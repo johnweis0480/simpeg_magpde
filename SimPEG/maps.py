@@ -1,8 +1,14 @@
+from __future__ import absolute_import
+from __future__ import division
+from __future__ import print_function
+from __future__ import unicode_literals
+from .utils.code_utils import deprecate_class
+
 from six import integer_types
 from six import string_types
 from collections import namedtuple
 import warnings
-import discretize
+
 import numpy as np
 from numpy.polynomial import polynomial
 import scipy.sparse as sp
@@ -13,6 +19,9 @@ from scipy.sparse import csr_matrix as csr
 
 import properties
 from discretize.tests import checkDerivative
+
+import torch as torch
+from torch.autograd.functional import jacobian, jvp
 
 from .utils import (
     setKwargs,
@@ -868,21 +877,21 @@ class SelfConsistentEffectiveMedium(IdentityMap, properties.HasProperties):
     def getQ(self, alpha):
         """Geometric factor in the depolarization tensor"""
         if alpha < 1.0:  # oblate spheroid
-            chi = np.sqrt((1.0 / alpha**2.0) - 1)
+            chi = np.sqrt((1.0 / alpha ** 2.0) - 1)
             return (
                 1.0
                 / 2.0
-                * (1 + 1.0 / (alpha**2.0 - 1) * (1.0 - np.arctan(chi) / chi))
+                * (1 + 1.0 / (alpha ** 2.0 - 1) * (1.0 - np.arctan(chi) / chi))
             )
         elif alpha > 1.0:  # prolate spheroid
-            chi = np.sqrt(1 - (1.0 / alpha**2.0))
+            chi = np.sqrt(1 - (1.0 / alpha ** 2.0))
             return (
                 1.0
                 / 2.0
                 * (
                     1
                     + 1.0
-                    / (alpha**2.0 - 1)
+                    / (alpha ** 2.0 - 1)
                     * (1.0 - 1.0 / (2.0 * chi) * np.log((1 + chi) / (1 - chi)))
                 )
             )
@@ -1583,6 +1592,121 @@ class InjectActiveCells(IdentityMap):
 #                                                                             #
 ###############################################################################
 
+class BaseParametric(IdentityMap):
+
+    slopeFact = 1  # will be scaled by the mesh.
+    slope = None
+    indActive = None
+
+    def __init__(self, mesh, **kwargs):
+        super(BaseParametric, self).__init__(mesh, **kwargs)
+
+        if self.slope is None:
+            self.slope = self.slopeFact / np.hstack(self.mesh.h).min()
+
+    @property
+    def x(self):
+        if getattr(self, "_x", None) is None:
+            if self.mesh.dim == 1:
+                self._x = [
+                    self.mesh.gridCC
+                    if self.indActive is None
+                    else self.mesh.gridCC[self.indActive]
+                ][0]
+            else:
+                self._x = [
+                    self.mesh.gridCC[:, 0]
+                    if self.indActive is None
+                    else self.mesh.gridCC[self.indActive, 0]
+                ][0]
+        return self._x
+
+    @property
+    def y(self):
+        if getattr(self, "_y", None) is None:
+            if self.mesh.dim > 1:
+                self._y = [
+                    self.mesh.gridCC[:, 1]
+                    if self.indActive is None
+                    else self.mesh.gridCC[self.indActive, 1]
+                ][0]
+            else:
+                self._y = None
+        return self._y
+
+    @property
+    def z(self):
+        if getattr(self, "_z", None) is None:
+            if self.mesh.dim > 2:
+                self._z = [
+                    self.mesh.gridCC[:, 2]
+                    if self.indActive is None
+                    else self.mesh.gridCC[self.indActive, 2]
+                ][0]
+            else:
+                self._z = None
+        return self._z
+
+    def _atanfct(self, val, slope):
+        return np.arctan(slope * val) / np.pi + 0.5
+
+    def _atanfctDeriv(self, val, slope):
+        # d/dx(atan(x)) = 1/(1+x**2)
+        x = slope * val
+        dx = -slope
+        return (1.0 / (1 + x ** 2)) / np.pi * dx
+
+
+class PytorchMapping(BaseParametric):
+    '''
+    This mapping combines pytorch and numpy.
+    Below each method is a list of the type of object and the library used to create it.
+    '''
+    def __init__(self, mesh=None, nP=None, indicesActive = None, forward_transform=None, inverse_transform=None,params = None, store_deriv = True,**kwargs):
+        self.mesh = mesh
+
+        self._nP = nP
+        self.forward_transform = forward_transform
+        self.inverse_transform = inverse_transform
+        self.indActive = indicesActive
+        self.params = params
+        self.xyz = np.vstack((self.x,self.y,self.z)).T
+        self.built_in_params = (self.xyz)
+        self.store_deriv = store_deriv
+
+    @property
+    def nP(self):
+        return self._nP
+
+
+    @property
+    def shape(self):
+        if self.indActive is not None:
+            return (self.indActive.sum(), self._nP)
+        else:
+            return (self.mesh.n_cells, self._nP)
+
+    def _transform(self, m):
+        '''
+        model parameters (parametric or latent dimensionality)
+        '''
+        m_loc = torch.Tensor(m)
+
+        if self.params is not None:
+             return self.forward_transform(m_loc,self.params,self.built_in_params).numpy()
+        else:
+            return self.forward_transform(m_loc).numpy()
+
+
+    def deriv(self, m, v=None):
+        m_loc = torch.Tensor(m)
+
+        if v is not None:
+            v_loc = torch.Tensor(v)
+            return sp.csr_matrix(jvp(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,v_loc)[1].numpy())
+        else:
+            return sp.csr_matrix(jacobian(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,strategy='forward-mode',vectorize=True).numpy())
+
 
 class ParametricCircleMap(IdentityMap):
     """ParametricCircleMap
@@ -1666,7 +1790,7 @@ class ParametricCircleMap(IdentityMap):
             * (-sig1 + sig2)
             / (
                 np.pi
-                * (a**2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1)
+                * (a ** 2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1)
                 * np.sqrt((X - x) ** 2 + (Y - y) ** 2)
             )
         )
@@ -1677,7 +1801,7 @@ class ParametricCircleMap(IdentityMap):
             * (-sig1 + sig2)
             / (
                 np.pi
-                * (a**2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1)
+                * (a ** 2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1)
                 * np.sqrt((X - x) ** 2 + (Y - y) ** 2)
             )
         )
@@ -1685,7 +1809,7 @@ class ParametricCircleMap(IdentityMap):
         g5 = (
             -a
             * (-sig1 + sig2)
-            / (np.pi * (a**2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1))
+            / (np.pi * (a ** 2 * (-r + np.sqrt((X - x) ** 2 + (Y - y) ** 2)) ** 2 + 1))
         )
 
         if v is not None:
@@ -1884,8 +2008,6 @@ class ParametricSplineMap(IdentityMap):
     slope = 1e4
 
     def __init__(self, mesh, pts, ptsv=None, order=3, logSigma=True, normal="X"):
-        if not isinstance(mesh, discretize.base.BaseTensorMesh):
-            raise NotImplementedError(f"{type(mesh)} is not supported.")
         IdentityMap.__init__(self, mesh)
         self.logSigma = logSigma
         self.order = order
@@ -2085,69 +2207,7 @@ class ParametricSplineMap(IdentityMap):
         return sp.csr_matrix(np.c_[g1, g2, g3])
 
 
-class BaseParametric(IdentityMap):
 
-    slopeFact = 1  # will be scaled by the mesh.
-    slope = None
-    indActive = None
-
-    def __init__(self, mesh, **kwargs):
-        super(BaseParametric, self).__init__(mesh, **kwargs)
-
-        if self.slope is None:
-            self.slope = self.slopeFact / np.hstack(self.mesh.h).min()
-
-    @property
-    def x(self):
-        if getattr(self, "_x", None) is None:
-            if self.mesh.dim == 1:
-                self._x = [
-                    self.mesh.gridCC
-                    if self.indActive is None
-                    else self.mesh.gridCC[self.indActive]
-                ][0]
-            else:
-                self._x = [
-                    self.mesh.gridCC[:, 0]
-                    if self.indActive is None
-                    else self.mesh.gridCC[self.indActive, 0]
-                ][0]
-        return self._x
-
-    @property
-    def y(self):
-        if getattr(self, "_y", None) is None:
-            if self.mesh.dim > 1:
-                self._y = [
-                    self.mesh.gridCC[:, 1]
-                    if self.indActive is None
-                    else self.mesh.gridCC[self.indActive, 1]
-                ][0]
-            else:
-                self._y = None
-        return self._y
-
-    @property
-    def z(self):
-        if getattr(self, "_z", None) is None:
-            if self.mesh.dim > 2:
-                self._z = [
-                    self.mesh.gridCC[:, 2]
-                    if self.indActive is None
-                    else self.mesh.gridCC[self.indActive, 2]
-                ][0]
-            else:
-                self._z = None
-        return self._z
-
-    def _atanfct(self, val, slope):
-        return np.arctan(slope * val) / np.pi + 0.5
-
-    def _atanfctDeriv(self, val, slope):
-        # d/dx(atan(x)) = 1/(1+x**2)
-        x = slope * val
-        dx = -slope
-        return (1.0 / (1 + x**2)) / np.pi * dx
 
 
 class ParametricLayer(BaseParametric):
@@ -2400,12 +2460,12 @@ class ParametricBlock(BaseParametric):
         return getattr(self, "_mDict{}d".format(self.mesh.dim))(m)
 
     def _ekblom(self, val):
-        return (val**2 + self.epsilon**2) ** (self.p / 2.0)
+        return (val ** 2 + self.epsilon ** 2) ** (self.p / 2.0)
 
     def _ekblomDeriv(self, val):
         return (
             (self.p / 2)
-            * (val**2 + self.epsilon**2) ** ((self.p / 2) - 1)
+            * (val ** 2 + self.epsilon ** 2) ** ((self.p / 2) - 1)
             * 2
             * val
         )
@@ -2471,7 +2531,7 @@ class ParametricBlock(BaseParametric):
                 getattr(self, "_block{}D".format(self.mesh.dim))(mDict),
                 slope=self.slope,
             )
-            * (self._ekblomDeriv((x - x0) / (0.5 * dx)) * (-(x - x0) / (0.5 * dx**2)))
+            * (self._ekblomDeriv((x - x0) / (0.5 * dx)) * (-(x - x0) / (0.5 * dx ** 2)))
         )
 
     def _deriv1D(self, mDict):
@@ -3500,3 +3560,45 @@ class PolynomialPetroClusterMap(IdentityMap):
         else:
             out = np.dot(self._derivmatrix(m.reshape(-1, 2)), v.reshape(2, -1))
             return out
+
+
+###############################################################################
+#                                                                             #
+#                              Deprecated Maps                               #
+#                                                                             #
+###############################################################################
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class FullMap(SurjectFull):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class Vertical1DMap(SurjectVertical1D):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class Map2Dto3D(Surject2Dto3D):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class ActiveCells(InjectActiveCells):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class CircleMap(ParametricCircleMap):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class PolyMap(ParametricPolyMap):
+    pass
+
+
+@deprecate_class(removal_version="0.16.0", error=True)
+class SplineMap(ParametricSplineMap):
+    pass
