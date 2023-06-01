@@ -4,7 +4,7 @@ from scipy.constants import mu_0
 
 from SimPEG import utils
 from ..base import BasePFSimulation, BaseEquivalentSourceLayerSimulation
-from ...base import BaseMagneticPDESimulation
+from ...base import BasePDESimulation,with_property_mass_matrices
 from .survey import Survey
 from .analytics import CongruousMagBC
 
@@ -451,60 +451,113 @@ class SimulationEquivalentSourceLayer(
     """
 
 
-class Simulation3DDifferential(BaseMagneticPDESimulation):
+@with_property_mass_matrices("mu")
+@with_property_mass_matrices("mui")
+@with_property_mass_matrices("rem")
+class Simulation3DDifferential(BasePDESimulation):
+    r"""A secondary field simulation for magnetic data.
+
+    Parameters
+    ----------
+    mesh : discretize.base.BaseMesh
+    survey : magnetics.suvey.Survey
+    mu : float, array_like
+        Magnetic Permeability Model (C/(s m^3)). Set this for forward
+        modeling or to fix while inverting for remanence. This is used if
+        muMap == None
+    rem : float, array_like
+        Magnetic Polarization \mu_0*M (nT). Set this for forward
+        modeling or to fix remanent magnetization whil inverting for permeability.
+        This is used if remMap == None
+    muMap : SimPEG.maps.IdentityMap, optional
+        The mapping used to go from the simulation model to `mu`. Set this
+        to invert for `mu`.
+    remMap : SimPEG.maps.IdentityMap, optional
+        The mapping used to go from the simulation model to `mu_0*M`. Set this
+        to invert for `mu_0*M`.
+    storeJ: bool
+        Whether to store the sensitivity matrix
+    updateJ: bool
+        Whether to update the sensitivity matrix. Can only be set to True if
+        storeJ is set to True. It is recommended to update if the magnetic
+        susceptibility > .1SI. If set to false but 'tmi_exact' is in magnetic
+        survey components, the sensitivity of bx,bx,bz at the reciever locations
+        with respect to the model will be stored.
+
+    Notes
+    -----
+    This simulation solves for the magnetostatic PDE:
+    \nabla \cdot \Vec{B} = 0
+
+    where the constitutive relation is defined as:
+    \Vec{B} = \mu\Vec{H} + \mu_0\Vec{M_r}
+
+    where \Vec{M_r} is a fixed magnetization unaffected by the inducing field
+    and \mu\Vec{H} is the induced magnetization
     """
-    Secondary field approach using differential equations!
-    """
+    _Jmatrix = None
 
-    def __init__(self, mesh, survey=None, **kwargs):
-        super().__init__(mesh, survey=survey, **kwargs)
+    mu, muMap, muDeriv = props.Invertible(
+        "Magnetic Permeability (H/m)",
+    )
 
-        Pbc, Pin, self._Pout = self.mesh.get_BC_projections(
-            "neumann", discretization="CC"
-        )
+    mui, muiMap, muiDeriv = props.Invertible("Inverse Magnetic Permeability (m/H)")
 
-        Dface = self.mesh.face_divergence
-        Mc = sdiag(self.mesh.cell_volumes)
-        self._Div = Mc * Dface * Pin.T.tocsr() * Pin
+    props.Reciprocal(mu, mui)
+
+    rem, remMap, remDeriv = props.Invertible("Magnetic Polarization (nT)")
+
+    def __init__(self, mesh, survey=None, mu=mu_0, rem=None, remMap=None, muMap=None, storeJ=False, update_J=True,
+                 **kwargs):
+        super().__init__(mesh=mesh, survey=survey, **kwargs)
+
+        if mu is None:
+            mu = mu_0
+
+        self.mu = mu
+        self.rem = rem
+        self.remMap = remMap
+        self.muMap = muMap
+
+        self.storeJ = storeJ
+        self.update_J = update_J
+
+        self.MfMu0i = self.mesh.get_face_inner_product(1.0 / mu_0)
+        self._Div = self.Mcc * self.mesh.face_divergence
+
+    def __setattr__(self, name, value):
+        super().__setattr__(name, value)
+        if name in ["mu", "mui", "rem"]:
+            for mat in self._clear_on_mu_update + self._clear_on_mui_update + self._clear_on_rem_update:
+                if hasattr(self, mat):
+                    delattr(self, mat)
 
     @property
     def survey(self):
-        """The survey for this simulation.
+        """The DC survey object.
 
         Returns
         -------
-        SimPEG.potential_fields.magnetics.survey.Survey
+        SimPEG.electromagnetics.static.resistivity.survey.Survey
         """
         if self._survey is None:
             raise AttributeError("Simulation must have a survey")
         return self._survey
 
     @survey.setter
-    def survey(self, obj):
-        if obj is not None:
-            obj = validate_type("survey", obj, Survey, cast=False)
-        self._survey = obj
+    def survey(self, value):
+        if value is not None:
+            value = validate_type("survey", value, Survey, cast=False)
+        self._survey = value
 
     @property
-    def MfMuI(self):
-        return self._MfMuI
+    def storeJ(self):
 
-    @property
-    def MfMui(self):
-        return self._MfMui
+        return self._storeJ
 
-    @property
-    def MfMu0(self):
-        return self._MfMu0
-
-    def makeMassMatrices(self, m):
-        mu = self.muMap * m
-        self._MfMui = self.mesh.get_face_inner_product(1.0 / mu) / self.mesh.dim
-        # self._MfMui = self.mesh.get_face_inner_product(1./mu)
-        # TODO: this will break if tensor mu
-        self._MfMuI = sdiag(1.0 / self._MfMui.diagonal())
-        self._MfMu0 = self.mesh.get_face_inner_product(1.0 / mu_0) / self.mesh.dim
-        # self._MfMu0 = self.mesh.get_face_inner_product(1/mu_0)
+    @storeJ.setter
+    def storeJ(self, value):
+        self._storeJ = validate_type("storeJ", value, bool)
 
     @utils.requires("survey")
     def getB0(self):
@@ -517,306 +570,252 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         return B0
 
     def getRHS(self, m):
-        r"""
 
-        .. math ::
+        self.model = m
 
-            \mathbf{rhs} =
-                \Div(\MfMui)^{-1}\mathbf{M}^f_{\mu_0^{-1}}\mathbf{B}_0
-                - \Div\mathbf{B}_0
-                +\diag(v)\mathbf{D} \mathbf{P}_{out}^T \mathbf{B}_{sBC}
+        rhs = 0
 
-        """
-        B0 = self.getB0()
+        if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
+            B0 = self.getB0()
+            rhs += self._Div * self.MfMuiI * self.MfMu0i * B0 - self._Div * B0
 
-        mu = self.muMap * m
-        chi = mu / mu_0 - 1
+        if getattr(self, "rem", None) is not None:
+            mu = self.mu * np.ones(self.mesh.n_cells)
+            mu_vec = np.hstack((mu, mu, mu))
+            rhs += self._Div * (self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)).diagonal()
 
-        # Temporary fix
-        Bbc, Bbc_const = CongruousMagBC(self.mesh, self.survey.source_field.b0, chi)
-        self.Bbc = Bbc
-        self.Bbc_const = Bbc_const
-        # return self._Div*self.MfMuI*self.MfMu0*B0 - self._Div*B0 +
-        # Mc*Dface*self._Pout.T*Bbc
-        return self._Div * self.MfMuI * self.MfMu0 * B0 - self._Div * B0
+        return rhs
 
     def getA(self, m):
-        r"""
-        GetA creates and returns the A matrix for the Magnetics problem
 
-        The A matrix has the form:
-
-        .. math ::
-
-            \mathbf{A} =  \Div(\MfMui)^{-1}\Div^{T}
-
-        """
-        return self._Div * self.MfMuI * self._Div.T.tocsr()
+        return self._Div * self.MfMuiI * self._Div.T
 
     def fields(self, m):
-        r"""
-        Return magnetic potential (u) and flux (B)
 
-        u: defined on the cell center [nC x 1]
-        B: defined on the cell center [nG x 1]
+        self.model = m
 
-        After we compute u, then we update B.
-
-        .. math ::
-
-            \mathbf{B}_s =
-                (\MfMui)^{-1}\mathbf{M}^f_{\mu_0^{-1}}\mathbf{B}_0
-                - \mathbf{B}_0
-                - (\MfMui)^{-1}\Div^T \mathbf{u}
-
-        """
-        self.makeMassMatrices(m)
         A = self.getA(m)
+
         rhs = self.getRHS(m)
         Ainv = self.solver(A, **self.solver_opts)
+
         u = Ainv * rhs
-        B0 = self.getB0()
-        B = self.MfMuI * self.MfMu0 * B0 - B0 - self.MfMuI * self._Div.T * u
+        B = - self.MfMuiI * self._Div.T * u
+
+        if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
+            B0 = self.getB0()
+            B += self.MfMu0i * self.MfMuiI * B0 - B0
+
+        if getattr(self, "rem", None) is not None:
+            mu = self.mu * np.ones(self.mesh.n_cells)
+            mu_vec = np.hstack((mu, mu, mu))
+            B += (self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)).diagonal()
+
         Ainv.clean()
 
         return {"B": B, "u": u}
 
-    @utils.timeIt
-    def Jvec(self, m, v, u=None):
-        r"""
-        Computing Jacobian multiplied by vector
+    def dpred(self, m=None, f=None):
 
-        By setting our problem as
+        if f is not None:
+            return self.projectFields(f)
 
-        .. math ::
+        if self._Jmatrix is not None and self.update_J == False:
+            if 'tmi_exact' not in self.survey.components:
+                return self._Jmatrix @ m
+            else:
+                dpred_fields = self._Jmatrix @ m
+                return self.projectFields({"B": dpred_fields, "u": None})
 
-            \mathbf{C}(\mathbf{m}, \mathbf{u}) = \mathbf{A}\mathbf{u} - \mathbf{rhs} = 0
+        if f is None:
+            f = self.fields(m)
 
-        And taking derivative w.r.t m
+        dpred = self.projectFields(f)
 
-        .. math ::
+        return dpred
 
-            \nabla \mathbf{C}(\mathbf{m}, \mathbf{u}) =
-                \nabla_m \mathbf{C}(\mathbf{m}) \delta \mathbf{m} +
-                \nabla_u \mathbf{C}(\mathbf{u}) \delta \mathbf{u} = 0
+    def Jvec(self, m, v, f=None):
 
-            \frac{\delta \mathbf{u}}{\delta \mathbf{m}} =
-                - [\nabla_u \mathbf{C}(\mathbf{u})]^{-1}\nabla_m \mathbf{C}(\mathbf{m})
+        if self.storeJ:
+            J = self.getJ(m, f=f)
+            return J.dot(v)
 
-        With some linear algebra we can have
+        self.model = m
 
-        .. math ::
+        if f is None:
+            f = self.fields(m)
 
-            \nabla_u \mathbf{C}(\mathbf{u}) = \mathbf{A}
+        B, u = f["B"], f["u"]
 
-            \nabla_m \mathbf{C}(\mathbf{m}) =
-                \frac{\partial \mathbf{A}} {\partial \mathbf{m}} (\mathbf{m}) \mathbf{u}
-                - \frac{\partial \mathbf{rhs}(\mathbf{m})}{\partial \mathbf{m}}
-
-        .. math ::
-
-            \frac{\partial \mathbf{A}}{\partial \mathbf{m}}(\mathbf{m})\mathbf{u} =
-                \frac{\partial \mathbf{\mu}}{\partial \mathbf{m}}
-                \left[\Div \diag (\Div^T \mathbf{u}) \dMfMuI \right]
-
-            \dMfMuI =
-                \diag(\MfMui)^{-1}_{vec}
-                \mathbf{Av}_{F2CC}^T\diag(\mathbf{v})\diag(\frac{1}{\mu^2})
-
-            \frac{\partial \mathbf{rhs}(\mathbf{m})}{\partial \mathbf{m}} =
-                \frac{\partial \mathbf{\mu}}{\partial \mathbf{m}}
-                \left[
-                    \Div \diag(\M^f_{\mu_{0}^{-1}}\mathbf{B}_0) \dMfMuI
-                \right]
-                - \diag(\mathbf{v}) \mathbf{D} \mathbf{P}_{out}^T
-                    \frac{\partial B_{sBC}}{\partial \mathbf{m}}
-
-        In the end,
-
-        .. math ::
-
-            \frac{\delta \mathbf{u}}{\delta \mathbf{m}} =
-            - [ \mathbf{A} ]^{-1}
-            \left[
-                \frac{\partial \mathbf{A}}{\partial \mathbf{m}}(\mathbf{m})\mathbf{u}
-                - \frac{\partial \mathbf{rhs}(\mathbf{m})}{\partial \mathbf{m}}
-            \right]
-
-        A little tricky point here is we are not interested in potential (u), but interested in magnetic flux (B).
-        Thus, we need sensitivity for B. Now we take derivative of B w.r.t m and have
-
-        .. math ::
-
-            \frac{\delta \mathbf{B}} {\delta \mathbf{m}} =
-            \frac{\partial \mathbf{\mu} } {\partial \mathbf{m} }
-            \left[
-                \diag(\M^f_{\mu_{0}^{-1} } \mathbf{B}_0) \dMfMuI  \
-                 - \diag (\Div^T\mathbf{u})\dMfMuI
-            \right ]
-
-             -  (\MfMui)^{-1}\Div^T\frac{\delta\mathbf{u}}{\delta \mathbf{m}}
-
-        Finally we evaluate the above, but we should remember that
-
-        .. note ::
-
-            We only want to evaluate
-
-            .. math ::
-
-                \mathbf{J}\mathbf{v} =
-                    \frac{\delta \mathbf{P}\mathbf{B}} {\delta \mathbf{m}}\mathbf{v}
-
-            Since forming sensitivity matrix is very expensive in that this
-            monster is "big" and "dense" matrix!!
-
-        """
-        if u is None:
-            u = self.fields(m)
-
-        B, u = u["B"], u["u"]
-        mu = self.muMap * (m)
-        dmu_dm = self.muDeriv
-        # dchidmu = sdiag(1 / mu_0 * np.ones(self.mesh.nC))
-
-        vol = self.mesh.cell_volumes
-        Div = self._Div
-        P = self.survey.projectFieldsDeriv(B)  # Projection matrix
+        Q = self.projectFieldsDeriv(B)
         B0 = self.getB0()
+        C = -self.MfMuiI * self._Div.T
 
-        MfMuIvec = 1 / self.MfMui.diagonal()
-        dMfMuI = sdiag(MfMuIvec**2) * self.mesh.aveF2CC.T * sdiag(vol * 1.0 / mu**2)
+        db_dm = 0
+        dCmu_dm = 0
 
-        # A = self._Div*self.MfMuI*self._Div.T
-        # RHS = Div*MfMuI*MfMu0*B0 - Div*B0 + Mc*Dface*Pout.T*Bbc
-        # C(m,u) = A*m-rhs
-        # dudm = -(dCdu)^(-1)dCdm
+        mu = np.ones(self.mesh.n_cells) * self.mu
+        mu_vec = np.hstack((mu, mu, mu))
 
-        dCdu = self.getA(m)  # = A
-        dCdm_A = Div * (sdiag(Div.T * u) * dMfMuI * dmu_dm)
-        dCdm_RHS1 = Div * (sdiag(self.MfMu0 * B0) * dMfMuI)
-        # temp1 = (Dface * (self._Pout.T * self.Bbc_const * self.Bbc))
-        # dCdm_RHS2v = (sdiag(vol) * temp1) * \
-        #    np.inner(vol, dchidmu * dmu_dm * v)
+        if self.remMap is not None:
+            Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
+                np.ones(self.mesh.n_cells * 3)
+            )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
+            db_dm += (self.MfMuiI * Mf_rem_deriv * v)
 
-        # dCdm_RHSv =  dCdm_RHS1*(dmu_dm*v) +  dCdm_RHS2v
-        dCdm_RHSv = dCdm_RHS1 * (dmu_dm * v)
-        dCdm_v = dCdm_A * v - dCdm_RHSv
+        if self.muMap is not None:
 
-        Ainv = self.solver(dCdu, **self.solver_opts)
-        sol = Ainv * dCdm_v
+            MfMuiIderiv = self.MfMuiIDeriv
+            dCmu_dm += MfMuiIderiv(self._Div.T @ u, v, adjoint=False)
+            db_dm += self.MfMu0i * MfMuiIderiv(B0, v, adjoint=False)
 
-        dudm = -sol
-        dBdmv = (
-            sdiag(self.MfMu0 * B0) * (dMfMuI * (dmu_dm * v))
-            - sdiag(Div.T * u) * (dMfMuI * (dmu_dm * v))
-            - self.MfMuI * (Div.T * (dudm))
-        )
+            if getattr(self, "rem", None) is not None:
+                Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
+                mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
+                Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
+                    np.ones(self.mesh.n_cells * 3)
+                )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
+                db_dm += MfMuiIderiv(Mf_r_over_uvec, v, adjoint=False) + (self.MfMuiI * Mf_mu_vec_i_deriv * v)
+
+        dq_dm_min_dAmu_dm = self._Div * (-dCmu_dm + db_dm)
+
+        A = self.getA(m)
+        Ainv = self.solver(A, **self.solver_opts)
+
+        Ainv_dqmindAmu = Ainv * dq_dm_min_dAmu_dm
 
         Ainv.clean()
 
-        return mkvc(P * dBdmv)
+        Jv = Q * (C * Ainv_dqmindAmu + (-dCmu_dm + db_dm))
 
-    @utils.timeIt
-    def Jtvec(self, m, v, u=None):
-        r"""
-        Computing Jacobian^T multiplied by vector.
+        return Jv
 
-        .. math ::
+    def Jtvec(self, m, v, f=None):
 
-            (\frac{\delta \mathbf{P}\mathbf{B}} {\delta \mathbf{m}})^{T} =
-                \left[
-                    \mathbf{P}_{deriv}\frac{\partial \mathbf{\mu} } {\partial \mathbf{m} }
-                    \left[
-                        \diag(\M^f_{\mu_{0}^{-1} } \mathbf{B}_0) \dMfMuI
-                         - \diag (\Div^T\mathbf{u})\dMfMuI
-                    \right ]
-                \right]^{T}
-                 -
-                 \left[
-                     \mathbf{P}_{deriv}(\MfMui)^{-1} \Div^T
-                     \frac{\delta\mathbf{u}}{\delta \mathbf{m}}
-                 \right]^{T}
+        if self.storeJ:
+            J = self.getJ(m, f=f)
+            return np.asarray(J.T.dot(v))
 
-        where
+        self.model = m
 
-        .. math ::
+        if f is None:
+            f = self.fields(m)
 
-            \mathbf{P}_{derv} = \frac{\partial \mathbf{P}}{\partial\mathbf{B}}
+        B, u = f["B"], f["u"]
 
-        .. note ::
-
-            Here we only want to compute
-
-            .. math ::
-
-                \mathbf{J}^{T}\mathbf{v} =
-                (\frac{\delta \mathbf{P}\mathbf{B}} {\delta \mathbf{m}})^{T} \mathbf{v}
-
-        """
-        if u is None:
-            u = self.fields(m)
-
-        B, u = u["B"], u["u"]
-        mu = self.mapping * (m)
-        dmu_dm = self.mapping.deriv(m)
-        # dchidmu = sdiag(1 / mu_0 * np.ones(self.mesh.nC))
-
-        vol = self.mesh.cell_volumes
-        Div = self._Div
-        P = self.survey.projectFieldsDeriv(B)  # Projection matrix
+        Q = self.projectFieldsDeriv(B)
         B0 = self.getB0()
 
-        MfMuIvec = 1 / self.MfMui.diagonal()
-        dMfMuI = sdiag(MfMuIvec**2) * self.mesh.aveF2CC.T * sdiag(vol * 1.0 / mu**2)
+        v_array = -self._Div * self.MfMuiI.T * Q.T * v
+        A_T = self.getA(m).T
 
-        # A = self._Div*self.MfMuI*self._Div.T
-        # RHS = Div*MfMuI*MfMu0*B0 - Div*B0 + Mc*Dface*Pout.T*Bbc
-        # C(m,u) = A*m-rhs
-        # dudm = -(dCdu)^(-1)dCdm
+        Ainv_T = self.solver(A_T, **self.solver_opts)
+        sol = Ainv_T * v_array
 
-        dCdu = self.getA(m)
-        s = Div * (self.MfMuI.T * (P.T * v))
+        Ainv_T.clean()
 
-        Ainv = self.solver(dCdu.T, **self.solver_opts)
-        sol = Ainv * s
+        DivTatsol = self._Div.T * sol
 
-        Ainv.clean()
+        mu = np.ones(self.mesh.n_cells) * self.mu
+        mu_vec = np.hstack((mu, mu, mu))
 
-        # dCdm_A = Div * ( sdiag( Div.T * u )* dMfMuI *dmu_dm  )
-        # dCdm_Atsol = ( dMfMuI.T*( sdiag( Div.T * u ) * (Div.T * dmu_dm)) ) * sol
-        dCdm_Atsol = (dmu_dm.T * dMfMuI.T * (sdiag(Div.T * u) * Div.T)) * sol
+        Jtv = 0
 
-        # dCdm_RHS1 = Div * (sdiag( self.MfMu0*B0  ) * dMfMuI)
-        # dCdm_RHS1tsol = (dMfMuI.T*( sdiag( self.MfMu0*B0  ) ) * Div.T * dmu_dm) * sol
-        dCdm_RHS1tsol = (dmu_dm.T * dMfMuI.T * (sdiag(self.MfMu0 * B0)) * Div.T) * sol
+        if self.remMap is not None:
+            Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
+                np.ones(self.mesh.n_cells * 3)
+            )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
+            Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol + Q.T * v)
 
-        # temp1 = (Dface*(self._Pout.T*self.Bbc_const*self.Bbc))
-        # temp1sol = (Dface.T * (sdiag(vol) * sol))
-        # temp2 = self.Bbc_const * (self._Pout.T * self.Bbc).T
-        # dCdm_RHS2v  = (sdiag(vol)*temp1)*np.inner(vol, dchidmu*dmu_dm*v)
-        # dCdm_RHS2tsol = (dmu_dm.T * dchidmu.T * vol) * np.inner(temp2, temp1sol)
+        if self.muMap is not None:
+            MfMuiIderiv = self.MfMuiIDeriv
+            DivTatu = self._Div.T * u
+            Jtv += MfMuiIderiv(DivTatu, -Q.T * v - DivTatsol, adjoint=True)
+            Jtv += MfMuiIderiv(B0, self.MfMu0i.T * (DivTatsol + Q.T * v), adjoint=True)
 
-        # dCdm_RHSv =  dCdm_RHS1*(dmu_dm*v) +  dCdm_RHS2v
+            if getattr(self, "rem", None) is not None:
+                Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
+                mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
 
-        # temporary fix
-        # dCdm_RHStsol = dCdm_RHS1tsol - dCdm_RHS2tsol
-        dCdm_RHStsol = dCdm_RHS1tsol
+                Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
+                    np.ones(self.mesh.n_cells * 3)
+                )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
 
-        # dCdm_RHSv =  dCdm_RHS1*(dmu_dm*v) +  dCdm_RHS2v
-        # dCdm_v = dCdm_A*v - dCdm_RHSv
+                Jtv += MfMuiIderiv(Mf_r_over_uvec, DivTatsol + Q.T * v, adjoint=True) + Mf_mu_vec_i_deriv.T * (
+                            self.MfMuiI.T * (DivTatsol + Q.T * v))
 
-        Ctv = dCdm_Atsol - dCdm_RHStsol
+        return Jtv
 
-        # B = self.MfMuI*self.MfMu0*B0-B0-self.MfMuI*self._Div.T*u
-        # dBdm = d\mudm*dBd\mu
-        # dPBdm^T*v = Atemp^T*P^T*v - Btemp^T*P^T*v - Ctv
+    def getJ(self, m, f=None):
 
-        Atemp = sdiag(self.MfMu0 * B0) * (dMfMuI * (dmu_dm))
-        Btemp = sdiag(Div.T * u) * (dMfMuI * (dmu_dm))
-        Jtv = Atemp.T * (P.T * v) - Btemp.T * (P.T * v) - Ctv
+        if self._Jmatrix is None:
 
-        return mkvc(Jtv)
+            self.model = m
+
+            if f is None:
+                f = self.fields(m)
+
+            B, u = f["B"], f["u"]
+
+            Q = self.projectFieldsDeriv(B)
+            B0 = self.getB0()
+
+            v_array = (-self._Div * self.MfMuiI.T * Q.T).toarray()
+            A_T = self.getA(m)
+            Ainv_T = self.solver(A_T, **self.solver_opts)
+            sol = Ainv_T * v_array
+
+            Ainv_T.clean()
+
+            DivTatsol = self._Div.T * sol
+
+            Jtv = 0
+
+            mu = np.ones(self.mesh.n_cells) * self.mu
+            mu_vec = np.hstack((mu, mu, mu))
+
+            if self.remMap is not None:
+                # Derivatives with respect to remenant components
+
+                Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
+                    np.ones(self.mesh.n_cells * 3)
+                )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
+
+                Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol + Q.T.toarray())
+
+            if self.muMap is not None:
+
+                MfMuiIderiv = self.MfMuiIDeriv
+                DivTatu = self._Div.T * u
+                Jtv += MfMuiIderiv(DivTatu, -Q.T.toarray() - DivTatsol, adjoint=True)
+                Jtv += MfMuiIderiv(B0, self.MfMu0i.T * (DivTatsol + Q.T.toarray()), adjoint=True)
+
+                if getattr(self, "rem", None) is not None:
+                    Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
+                    mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
+
+                    Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
+                        np.ones(self.mesh.n_cells * 3)
+                    )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
+
+                    Jtv += MfMuiIderiv(Mf_r_over_uvec, DivTatsol + Q.T.toarray(),
+                                       adjoint=True) + Mf_mu_vec_i_deriv.T * (
+                                   self.MfMuiI.T * (DivTatsol + Q.T.toarray()))
+
+
+        else:
+            Jtv = self._Jmatrix.T
+
+        if self.storeJ == True:
+            self._Jmatrix = Jtv.T
+
+        J = Jtv.T
+
+        if self.update_J == False and "tmi_exact" in self.survey.components:
+            projection_deriv = self.projectFieldsDeriv(J @ m)
+            J = projection_deriv * J
+
+        return J
 
     @property
     def Qfx(self):
@@ -843,68 +842,87 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         return self._Qfz
 
     def projectFields(self, u):
-        r"""
-        This function projects the fields onto the data space.
-        Especially, here for we use total magnetic intensity (TMI) data,
-        which is common in practice.
-        First we project our B on to data location
 
-        .. math::
-
-            \mathbf{B}_{rec} = \mathbf{P} \mathbf{B}
-
-        then we take the dot product between B and b_0
-
-        .. math ::
-
-            \text{TMI} = \vec{B}_s \cdot \hat{B}_0
-
-        """
-        # TODO: There can be some different tyes of data like |B| or B
         components = self.survey.components
 
         fields = {}
-        if "bx" in components or "tmi" in components:
-            fields["bx"] = self.Qfx * u["B"]
-        if "by" in components or "tmi" in components:
-            fields["by"] = self.Qfy * u["B"]
-        if "bz" in components or "tmi" in components:
-            fields["bz"] = self.Qfz * u["B"]
+
+        if u["u"] is None:
+
+            fields["bx"], fields["by"], fields["bz"] = np.split(u["B"], 3)
+
+        else:
+            if "bx" in components or "tmi" in components or "tmi_exact" in components:
+                fields["bx"] = self.Qfx * u["B"]
+            if "by" in components or "tmi" in components or "tmi_exact" in components:
+                fields["by"] = self.Qfy * u["B"]
+            if "bz" in components or "tmi" in components or "tmi_exact" in components:
+                fields["bz"] = self.Qfz * u["B"]
+
+        B0 = self.survey.source_field.b0
+
+        if "tmi_exact" in components:
+            Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
+            box = B0[0]
+            boy = B0[1]
+            boz = B0[2]
+            fields["tmi_exact"] = np.sqrt(
+                (fields["bx"] + box) ** 2 + (fields["by"] + boy) ** 2 + (fields["bz"] + boz) ** 2) - Bot
 
         if "tmi" in components:
-            bx = fields["bx"]
-            by = fields["by"]
-            bz = fields["bz"]
-            # Generate unit vector
-            B0 = self.survey.source_field.b0
             Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
             box = B0[0] / Bot
             boy = B0[1] / Bot
             boz = B0[2] / Bot
-            fields["tmi"] = bx * box + by * boy + bz * boz
+            fields["tmi"] = fields["bx"] * box + fields["by"] * boy + fields["bz"] * boz
 
         return np.concatenate([fields[comp] for comp in components])
 
     @utils.count
-    def projectFieldsDeriv(self, B):
-        r"""
-        This function projects the fields onto the data space.
-
-        .. math::
-
-            \frac{\partial d_\text{pred}}{\partial \mathbf{B}} = \mathbf{P}
-
-        Especially, this function is for TMI data type
-        """
+    def projectFieldsDeriv(self, Bs):
 
         components = self.survey.components
 
         fields = {}
-        if "bx" in components or "tmi" in components:
+
+        B0 = self.survey.source_field.b0
+        Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
+
+        box = B0[0]
+        boy = B0[1]
+        boz = B0[2]
+
+        if self.update_J == False and self._Jmatrix is not None and "tmi_exact" in components:
+            bx, by, bz = np.split(Bs, 3)
+
+            total_field = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2)
+            dTMIe_dx = sp.diags((box + bx) / total_field)
+            dTMIe_dy = sp.diags((boy + by) / total_field)
+            dTMIe_dz = sp.diags((boz + bz) / total_field)
+
+            fields["tmi_exact"] = sp.hstack([dTMIe_dx, dTMIe_dy, dTMIe_dz])
+
+            diag_b = sp.diags(np.ones_like(bx))
+
+            if "bx" in components:
+                fields["bx"] = sp.hstack([diag_b, 0 * diag_b, 0 * diag_b])
+            if "by" in components:
+                fields["by"] = sp.hstack([0 * diag_b, diag_b, 0 * diag_b])
+            if "bz" in components:
+                fields["bz"] = sp.hstack([0 * diag_b, 0 * diag_b, diag_b])
+            if "tmi" in components:
+                dTMIa_dx = sp.diags(np.ones_like(bx) * box / Bot)
+                dTMIa_dy = sp.diags(np.ones_like(bx) * boy / Bot)
+                dTMIa_dz = sp.diags(np.ones_like(bx) * boz / Bot)
+                fields["tmi"] = sp.hstack([dTMIa_dx, dTMIa_dy, dTMIa_dz])
+
+            return sp.vstack([fields[comp] for comp in components])
+
+        if "bx" in components or "tmi" in components or "tmi_exact" in components:
             fields["bx"] = self.Qfx
-        if "by" in components or "tmi" in components:
+        if "by" in components or "tmi" in components or "tmi_exact" in components:
             fields["by"] = self.Qfy
-        if "bz" in components or "tmi" in components:
+        if "bz" in components or "tmi" in components or "tmi_exact" in components:
             fields["bz"] = self.Qfz
 
         if "tmi" in components:
@@ -919,42 +937,39 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
             boz = B0[2] / Bot
             fields["tmi"] = bx * box + by * boy + bz * boz
 
+        if "tmi_exact" in components:
+            if self.update_J == False and self._Jmatrix is None:
+                return sp.vstack((self.Qfx, self.Qfy, self.Qfz))
+
+            box = B0[0]
+            boy = B0[1]
+            boz = B0[2]
+
+            bx = self.Qfx * Bs
+            by = self.Qfy * Bs
+            bz = self.Qfz * Bs
+
+            dpred = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
+
+            dDhalf_dD = sdiag(1 / (dpred + Bot))
+
+            xterm = sdiag(box + bx) * self.Qfx
+            yterm = sdiag(boy + by) * self.Qfy
+            zterm = sdiag(boz + bz) * self.Qfz
+
+            fields["tmi_exact"] = dDhalf_dD * (xterm + yterm + zterm)
+
         return sp.vstack([fields[comp] for comp in components])
 
-    def projectFieldsAsVector(self, B):
-        bfx = self.Qfx * B
-        bfy = self.Qfy * B
-        bfz = self.Qfz * B
+    @property
+    def deleteTheseOnModelUpdate(self):
+        toDelete = super().deleteTheseOnModelUpdate
+        if self.update_J:
+            if self._Jmatrix is not None:
+                toDelete = toDelete + ["_Jmatrix"]
+        if self.muMap is not None or self.muiMap is not None:
+            toDelete = toDelete + self._clear_on_mu_update + self._clear_on_mui_update
+        if self.remMap is not None:
+            toDelete = toDelete + self._clear_on_rem_update
+        return toDelete
 
-        return np.r_[bfx, bfy, bfz]
-
-
-def MagneticsDiffSecondaryInv(mesh, model, data, **kwargs):
-    """
-    Inversion module for MagneticsDiffSecondary
-
-    """
-    from SimPEG import (
-        optimization,
-        regularization,
-        directives,
-        objective_function,
-        inversion,
-    )
-
-    prob = Simulation3DDifferential(mesh, survey=data, mu=model)
-
-    miter = kwargs.get("maxIter", 10)
-
-    # Create an optimization program
-    opt = optimization.InexactGaussNewton(maxIter=miter)
-    opt.bfgsH0 = Solver(sp.identity(model.nP), flag="D")
-    # Create a regularization program
-    reg = regularization.WeightedLeastSquares(model)
-    # Create an objective function
-    beta = directives.BetaSchedule(beta0=1e0)
-    obj = objective_function.BaseObjFunction(prob, reg, beta=beta)
-    # Create an inversion object
-    inv = inversion.BaseInversion(obj, opt)
-
-    return inv, reg

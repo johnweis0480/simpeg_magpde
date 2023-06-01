@@ -51,6 +51,7 @@ class Point(survey.BaseRx):
                     "by",
                     "bz",
                     "tmi",
+                    "tmi_exact",
                 ],
             )
         self.components = components
