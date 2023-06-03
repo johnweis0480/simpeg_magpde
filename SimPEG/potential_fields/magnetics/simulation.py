@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import scipy.sparse as sp
 from scipy.constants import mu_0
@@ -476,13 +478,7 @@ class Simulation3DDifferential(BasePDESimulation):
         The mapping used to go from the simulation model to `mu_0*M`. Set this
         to invert for `mu_0*M`.
     storeJ: bool
-        Whether to store the sensitivity matrix
-    updateJ: bool
-        Whether to update the sensitivity matrix. Can only be set to True if
-        storeJ is set to True. It is recommended to update if the magnetic
-        susceptibility > .1SI. If set to false but 'tmi_exact' is in magnetic
-        survey components, the sensitivity of bx,bx,bz at the reciever locations
-        with respect to the model will be stored.
+        Whether to store the sensitivity matrix. If set to True
 
     Notes
     -----
@@ -496,6 +492,7 @@ class Simulation3DDifferential(BasePDESimulation):
     and \mu\Vec{H} is the induced magnetization
     """
     _Jmatrix = None
+    _Ainv = None
 
     mu, muMap, muDeriv = props.Invertible(
         "Magnetic Permeability (H/m)",
@@ -507,12 +504,17 @@ class Simulation3DDifferential(BasePDESimulation):
 
     rem, remMap, remDeriv = props.Invertible("Magnetic Polarization (nT)")
 
-    def __init__(self, mesh, survey=None, mu=mu_0, rem=None, remMap=None, muMap=None, storeJ=False, update_J=True,
+    def __init__(self, mesh, survey=None, mu=None, rem=None, remMap=None, muMap=None, storeJ=False,
                  **kwargs):
         super().__init__(mesh=mesh, survey=survey, **kwargs)
 
         if mu is None:
             mu = mu_0
+
+        if muMap is not None or storeJ is False:
+            self._update_J = True
+        else:
+            self._update_J = False
 
         self.mu = mu
         self.rem = rem
@@ -520,9 +522,8 @@ class Simulation3DDifferential(BasePDESimulation):
         self.muMap = muMap
 
         self.storeJ = storeJ
-        self.update_J = update_J
 
-        self.MfMu0i = self.mesh.get_face_inner_product(1.0 / mu_0)
+        self._MfMu0i = self.mesh.get_face_inner_product(1.0 / mu_0)
         self._Div = self.Mcc * self.mesh.face_divergence
 
     def __setattr__(self, name, value):
@@ -552,7 +553,6 @@ class Simulation3DDifferential(BasePDESimulation):
 
     @property
     def storeJ(self):
-
         return self._storeJ
 
     @storeJ.setter
@@ -577,7 +577,7 @@ class Simulation3DDifferential(BasePDESimulation):
 
         if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
             B0 = self.getB0()
-            rhs += self._Div * self.MfMuiI * self.MfMu0i * B0 - self._Div * B0
+            rhs += self._Div * self.MfMuiI * self._MfMu0i * B0 - self._Div * B0
 
         if getattr(self, "rem", None) is not None:
             mu = self.mu * np.ones(self.mesh.n_cells)
@@ -594,24 +594,25 @@ class Simulation3DDifferential(BasePDESimulation):
 
         self.model = m
 
+        if self._Ainv is not None:
+            self._Ainv.clean()
         A = self.getA(m)
+        self._Ainv = self.solver(A, **self.solver_opts)
 
         rhs = self.getRHS(m)
-        Ainv = self.solver(A, **self.solver_opts)
 
-        u = Ainv * rhs
+        u = self._Ainv * rhs
         B = - self.MfMuiI * self._Div.T * u
 
         if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
             B0 = self.getB0()
-            B += self.MfMu0i * self.MfMuiI * B0 - B0
+            B += self._MfMu0i * self.MfMuiI * B0 - B0
 
         if getattr(self, "rem", None) is not None:
             mu = self.mu * np.ones(self.mesh.n_cells)
             mu_vec = np.hstack((mu, mu, mu))
             B += (self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)).diagonal()
 
-        Ainv.clean()
 
         return {"B": B, "u": u}
 
@@ -620,7 +621,8 @@ class Simulation3DDifferential(BasePDESimulation):
         if f is not None:
             return self.projectFields(f)
 
-        if self._Jmatrix is not None and self.update_J == False:
+        if self._Jmatrix is not None and self._update_J is False:
+
             if 'tmi_exact' not in self.survey.components:
                 return self._Jmatrix @ m
             else:
@@ -664,10 +666,9 @@ class Simulation3DDifferential(BasePDESimulation):
             db_dm += (self.MfMuiI * Mf_rem_deriv * v)
 
         if self.muMap is not None:
-
             MfMuiIderiv = self.MfMuiIDeriv
             dCmu_dm += MfMuiIderiv(self._Div.T @ u, v, adjoint=False)
-            db_dm += self.MfMu0i * MfMuiIderiv(B0, v, adjoint=False)
+            db_dm += self._MfMu0i * MfMuiIderiv(B0, v, adjoint=False)
 
             if getattr(self, "rem", None) is not None:
                 Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
@@ -679,12 +680,7 @@ class Simulation3DDifferential(BasePDESimulation):
 
         dq_dm_min_dAmu_dm = self._Div * (-dCmu_dm + db_dm)
 
-        A = self.getA(m)
-        Ainv = self.solver(A, **self.solver_opts)
-
-        Ainv_dqmindAmu = Ainv * dq_dm_min_dAmu_dm
-
-        Ainv.clean()
+        Ainv_dqmindAmu = self._Ainv * dq_dm_min_dAmu_dm
 
         Jv = Q * (C * Ainv_dqmindAmu + (-dCmu_dm + db_dm))
 
@@ -707,12 +703,8 @@ class Simulation3DDifferential(BasePDESimulation):
         B0 = self.getB0()
 
         v_array = -self._Div * self.MfMuiI.T * Q.T * v
-        A_T = self.getA(m).T
 
-        Ainv_T = self.solver(A_T, **self.solver_opts)
-        sol = Ainv_T * v_array
-
-        Ainv_T.clean()
+        sol = self._Ainv * v_array
 
         DivTatsol = self._Div.T * sol
 
@@ -731,7 +723,7 @@ class Simulation3DDifferential(BasePDESimulation):
             MfMuiIderiv = self.MfMuiIDeriv
             DivTatu = self._Div.T * u
             Jtv += MfMuiIderiv(DivTatu, -Q.T * v - DivTatsol, adjoint=True)
-            Jtv += MfMuiIderiv(B0, self.MfMu0i.T * (DivTatsol + Q.T * v), adjoint=True)
+            Jtv += MfMuiIderiv(B0, self._MfMu0i.T * (DivTatsol + Q.T * v), adjoint=True)
 
             if getattr(self, "rem", None) is not None:
                 Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
@@ -749,8 +741,6 @@ class Simulation3DDifferential(BasePDESimulation):
     def getJ(self, m, f=None):
 
         if self._Jmatrix is None:
-
-            self.model = m
 
             if f is None:
                 f = self.fields(m)
@@ -775,8 +765,6 @@ class Simulation3DDifferential(BasePDESimulation):
             mu_vec = np.hstack((mu, mu, mu))
 
             if self.remMap is not None:
-                # Derivatives with respect to remenant components
-
                 Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
                     np.ones(self.mesh.n_cells * 3)
                 )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
@@ -784,11 +772,10 @@ class Simulation3DDifferential(BasePDESimulation):
                 Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol + Q.T.toarray())
 
             if self.muMap is not None:
-
                 MfMuiIderiv = self.MfMuiIDeriv
                 DivTatu = self._Div.T * u
                 Jtv += MfMuiIderiv(DivTatu, -Q.T.toarray() - DivTatsol, adjoint=True)
-                Jtv += MfMuiIderiv(B0, self.MfMu0i.T * (DivTatsol + Q.T.toarray()), adjoint=True)
+                Jtv += MfMuiIderiv(B0, self._MfMu0i.T * (DivTatsol + Q.T.toarray()), adjoint=True)
 
                 if getattr(self, "rem", None) is not None:
                     Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
@@ -811,7 +798,7 @@ class Simulation3DDifferential(BasePDESimulation):
 
         J = Jtv.T
 
-        if self.update_J == False and "tmi_exact" in self.survey.components:
+        if self._update_J == False and "tmi_exact" in self.survey.components:
             projection_deriv = self.projectFieldsDeriv(J @ m)
             J = projection_deriv * J
 
@@ -892,7 +879,7 @@ class Simulation3DDifferential(BasePDESimulation):
         boy = B0[1]
         boz = B0[2]
 
-        if self.update_J == False and self._Jmatrix is not None and "tmi_exact" in components:
+        if self._update_J == False and self._Jmatrix is not None and "tmi_exact" in components:
             bx, by, bz = np.split(Bs, 3)
 
             total_field = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2)
@@ -938,7 +925,7 @@ class Simulation3DDifferential(BasePDESimulation):
             fields["tmi"] = bx * box + by * boy + bz * boz
 
         if "tmi_exact" in components:
-            if self.update_J == False and self._Jmatrix is None:
+            if self._update_J == False and self._Jmatrix is None:
                 return sp.vstack((self.Qfx, self.Qfy, self.Qfz))
 
             box = B0[0]
@@ -964,7 +951,7 @@ class Simulation3DDifferential(BasePDESimulation):
     @property
     def deleteTheseOnModelUpdate(self):
         toDelete = super().deleteTheseOnModelUpdate
-        if self.update_J:
+        if self._update_J:
             if self._Jmatrix is not None:
                 toDelete = toDelete + ["_Jmatrix"]
         if self.muMap is not None or self.muiMap is not None:

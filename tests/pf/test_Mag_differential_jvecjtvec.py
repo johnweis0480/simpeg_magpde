@@ -9,9 +9,9 @@ import discretize
 import SimPEG.potential_fields as PF
 
 
-def get_mesh(fac=1):
+def get_mesh():
 
-    dhx, dhy, dhz = fac*100., fac*100., fac*100.  # minimum cell width (base mesh cell width)
+    dhx, dhy, dhz = 400., 400., 400.  # minimum cell width (base mesh cell width)
     nbcx = 512  # number of base mesh cells in x
     nbcy = 512
     nbcz = 512
@@ -188,7 +188,7 @@ def test_adjoint(deriv_type):
 def test_functionality():
     np.random.seed(40)
 
-    mesh = get_mesh(fac=2)
+    mesh = get_mesh()
     survey = get_survey(components = ['bx','by','bz','tmi_exact','tmi'])
     eff_sus_map = maps.EffectiveSusMap(nP = mesh.n_cells*3,inducing_magnitude=survey.source_field.amplitude)
 
@@ -204,7 +204,6 @@ def test_functionality():
         mesh=mesh,
         remMap=eff_sus_map,
         storeJ = True,
-        update_J= False
     )
 
 

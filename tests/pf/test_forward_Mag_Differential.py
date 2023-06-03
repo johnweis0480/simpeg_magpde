@@ -26,7 +26,7 @@ class ProlateEllispse():
                 susceptibility of ellipsoid (SI).
             Mr : (3) array_like, optional
                 Intrinsic remanent magnetic polarization (\mu_0 M) of ellipsoid.
-                If susceptibility = 0,equivalent to total magnetization. (nT)
+                If susceptibility = 0,equivalent to total resultant magnetization. (nT)
             inducing_field : (3) array_like, optional
                 Ambient Geomagnetic Field.  (strength(nT),inclination (degrees), declination (degrees)
             """
@@ -520,7 +520,6 @@ def get_survey(components = ['bx','by','bz']):
     ccx = np.linspace(-1400, 1400, num=57)
     ccy = np.linspace(-1400, 1400, num=57)
     ccx,ccy = np.meshgrid(ccx,ccy)
-    ccz = np.copy(ccx)
     ccz = 50. * np.ones_like(ccx)
     rxLoc = PF.magnetics.receivers.Point(np.c_[utils.mkvc(ccy.T), utils.mkvc(ccx.T), utils.mkvc(ccz.T)],
                                          components=components)
@@ -600,9 +599,11 @@ def test_forward(model_type):
     dpred_numeric=simulation.dpred()
     dpred_analytic = mkvc(ellipsoid.anomalous_bfield(survey.receiver_locations))
 
-    err = np.linalg.norm(dpred_numeric - dpred_analytic)
+    err = np.linalg.norm(dpred_numeric - dpred_analytic)/ np.linalg.norm(dpred_analytic)
 
-    assert(err / np.linalg.norm(dpred_analytic) < tol)
+    print("\n||dpred_analytic-dpred_numeric||/||dpred_analytic|| = "+"{:.{}f}".format(err, 2)+', tol = '+str(tol))
+
+    assert err  < tol
 
 def test_TMI_approximate_exact():
     '''
@@ -675,10 +676,16 @@ def test_TMI_approximate_exact():
     TMI_approx_analytic = dpred_fields @ B0_hat
     TMI_exact_analytic = np.linalg.norm(dpred_fields+B0,axis=1)-amplitude
 
+    TMI_num_diff = np.max(np.abs(dpred_TMI_exact - dpred_TMI_approx))
+    TMI_approx_err = np.max(np.abs(dpred_TMI_approx-TMI_approx_analytic))
+    TMI_exact_err = np.max(np.abs(dpred_TMI_exact - TMI_exact_analytic))
 
-    assert(np.max(np.abs(dpred_TMI_exact - dpred_TMI_approx)) > tol)
-    assert(np.max(np.abs(dpred_TMI_approx-TMI_approx_analytic)) < tol)
-    assert(np.max(np.abs(dpred_TMI_exact-TMI_exact_analytic)) < tol)
+    assert TMI_num_diff > tol
+    assert TMI_approx_err < tol
+    assert TMI_exact_err < tol
+    print("\nmax(TMI_exact - TMI_approx) = " + "{:.{}f}".format(TMI_num_diff, 2) + ', tol = ' + str(tol))
+    print("max(TMI_approx_err) = " + "{:.{}e}".format(TMI_approx_err, 2) + ', tol = ' + str(tol))
+    print("max(TMI_exact_err) = " + "{:.{}e}".format(TMI_exact_err, 2) + ', tol = ' + str(tol))
 
 def test_differential_magnetization_against_integral():
 
@@ -733,9 +740,14 @@ def test_differential_magnetization_against_integral():
     dpred_numeric_integral = np.hstack((dni[0::3], dni[1::3], dni[2::3]))
     dpred_analytic = mkvc(ellipsoid.anomalous_bfield(survey.receiver_locations))
 
-    diff_numeric = np.linalg.norm(dpred_numeric_differential - dpred_numeric_integral)
-    diff_differential = np.linalg.norm(dpred_numeric_differential - dpred_analytic)
-    diff_integral = np.linalg.norm(dpred_numeric_integral - dpred_analytic)
+    diff_numeric = np.linalg.norm(dpred_numeric_differential - dpred_numeric_integral)/np.linalg.norm(dpred_numeric_integral)
+    diff_differential = np.linalg.norm(dpred_numeric_differential - dpred_analytic)/np.linalg.norm(dpred_analytic)
+    diff_integral = np.linalg.norm(dpred_numeric_integral - dpred_analytic)/np.linalg.norm(dpred_analytic)
 
     # Check both discretized solutions are closer to each other than to the analytic
-    assert (diff_numeric < diff_differential and diff_numeric < diff_integral)
+    assert diff_numeric < diff_differential
+    assert diff_numeric < diff_integral
+
+    print("\n||dpred_integral-dpred_pde||/||dpred_integral|| = " + "{:.{}f}".format(diff_numeric, 2))
+    print("||dpred_integral-dpred_analytic||/||dpred_analytic|| = " + "{:.{}f}".format(diff_integral, 2))
+    print("||dpred_pde-dpred_analytic||/||dpred_analytic|| = " + "{:.{}f}".format(diff_differential, 2))
