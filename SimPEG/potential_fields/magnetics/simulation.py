@@ -751,11 +751,7 @@ class Simulation3DDifferential(BasePDESimulation):
             B0 = self.getB0()
 
             v_array = (-self._Div * self.MfMuiI.T * Q.T).toarray()
-            A_T = self.getA(m)
-            Ainv_T = self.solver(A_T, **self.solver_opts)
-            sol = Ainv_T * v_array
-
-            Ainv_T.clean()
+            sol = self._Ainv * v_array
 
             DivTatsol = self._Div.T * sol
 
