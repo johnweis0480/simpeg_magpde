@@ -50,7 +50,7 @@ def test_derivative(deriv_type):
     np.random.seed(40)
 
     mesh = get_mesh()
-    survey = get_survey(components = ['bx','by','bz','tmi_exact','tmi'])
+    survey = get_survey(components = ['bx','by','bz','tmi'])
     chimap = maps.ChiMap(mesh)
     eff_sus_map = maps.EffectiveSusMap(nP = mesh.n_cells*3,inducing_magnitude=survey.source_field.amplitude)
 
@@ -121,7 +121,7 @@ def test_adjoint(deriv_type):
     np.random.seed(40)
 
     mesh = get_mesh()
-    survey = get_survey(components = ['bx','by','bz','tmi_exact','tmi'])
+    survey = get_survey(components = ['bx','by','bz','tmi'])
     chimap = maps.ChiMap(mesh)
     eff_sus_map = maps.EffectiveSusMap(nP = mesh.n_cells*3,inducing_magnitude=survey.source_field.amplitude)
 
@@ -189,7 +189,7 @@ def test_functionality():
     np.random.seed(40)
 
     mesh = get_mesh()
-    survey = get_survey(components = ['bx','by','bz','tmi_exact','tmi'])
+    survey = get_survey(components = ['bx','by','bz','tmi'])
     eff_sus_map = maps.EffectiveSusMap(nP = mesh.n_cells*3,inducing_magnitude=survey.source_field.amplitude)
 
     Rx = np.random.randn(mesh.n_cells)
@@ -204,6 +204,7 @@ def test_functionality():
         mesh=mesh,
         remMap=eff_sus_map,
         storeJ = True,
+        exact_TMI=True,
     )
 
 

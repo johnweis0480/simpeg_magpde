@@ -653,16 +653,18 @@ def test_TMI_approximate_exact():
         mesh=mesh,
         mu=mu_model,
         rem=u0_Mr_model,
+        exact_TMI=False
     )
 
     dpred_numeric_approx=simulation_approx.dpred()
 
-    survey = get_survey(components=['tmi_exact'])
+    survey = get_survey(components=['tmi'])
     simulation_exact = PF.magnetics.simulation.Simulation3DDifferential(
         survey=survey,
         mesh=mesh,
         mu=mu_model,
         rem=u0_Mr_model,
+        exact_TMI=True
     )
 
     dpred_TMI_exact = simulation_exact.dpred()

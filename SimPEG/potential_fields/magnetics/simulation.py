@@ -6,7 +6,7 @@ from scipy.constants import mu_0
 
 from SimPEG import utils
 from ..base import BasePFSimulation, BaseEquivalentSourceLayerSimulation
-from ...base import BasePDESimulation,with_property_mass_matrices
+from ...base import BaseMagneticPDESimulation
 from .survey import Survey
 from .analytics import CongruousMagBC
 
@@ -453,10 +453,7 @@ class SimulationEquivalentSourceLayer(
     """
 
 
-@with_property_mass_matrices("mu")
-@with_property_mass_matrices("mui")
-@with_property_mass_matrices("rem")
-class Simulation3DDifferential(BasePDESimulation):
+class Simulation3DDifferential(BaseMagneticPDESimulation):
     r"""A secondary field simulation for magnetic data.
 
     Parameters
@@ -469,7 +466,7 @@ class Simulation3DDifferential(BasePDESimulation):
         muMap == None
     rem : float, array_like
         Magnetic Polarization \mu_0*M (nT). Set this for forward
-        modeling or to fix remanent magnetization whil inverting for permeability.
+        modeling or to fix remanent magnetization while inverting for permeability.
         This is used if remMap == None
     muMap : SimPEG.maps.IdentityMap, optional
         The mapping used to go from the simulation model to `mu`. Set this
@@ -479,6 +476,10 @@ class Simulation3DDifferential(BasePDESimulation):
         to invert for `mu_0*M`.
     storeJ: bool
         Whether to store the sensitivity matrix. If set to True
+    exact_TMI: bool
+        Preforms an exact TMI projection if set to True and "tmi" is in
+        survey.components
+
 
     Notes
     -----
@@ -494,52 +495,45 @@ class Simulation3DDifferential(BasePDESimulation):
     _Jmatrix = None
     _Ainv = None
 
-    mu, muMap, muDeriv = props.Invertible(
-        "Magnetic Permeability (H/m)",
-    )
-
-    mui, muiMap, muiDeriv = props.Invertible("Inverse Magnetic Permeability (m/H)")
-
-    props.Reciprocal(mu, mui)
-
     rem, remMap, remDeriv = props.Invertible("Magnetic Polarization (nT)")
 
-    def __init__(self, mesh, survey=None, mu=None, rem=None, remMap=None, muMap=None, storeJ=False,
+    def __init__(self, mesh, survey=None, mu=None, rem=None, remMap=None, muMap=None, storeJ=False, exact_TMI = True,
                  **kwargs):
-        super().__init__(mesh=mesh, survey=survey, **kwargs)
 
         if mu is None:
             mu = mu_0
 
-        if muMap is not None or storeJ is False:
-            self._update_J = True
-        else:
-            self._update_J = False
+        super().__init__(mesh=mesh, survey=survey, mu=mu,muMap=muMap, **kwargs)
 
-        self.mu = mu
+        if muMap is None and np.isscalar(mu) and np.allclose(mu, mu_0) and storeJ is True:
+            self._update_J = False
+        else:
+            self._update_J = True
+
         self.rem = rem
         self.remMap = remMap
-        self.muMap = muMap
 
         self.storeJ = storeJ
+        self.exact_TMI = exact_TMI
 
         self._MfMu0i = self.mesh.get_face_inner_product(1.0 / mu_0)
         self._Div = self.Mcc * self.mesh.face_divergence
+        self._DivT = self._Div.T.tocsr()
+        self._Mf_vec_deriv = self.mesh.get_face_inner_product_deriv(
+            np.ones(self.mesh.n_cells * 3)
+        )(np.ones(self.mesh.n_faces))
 
-    def __setattr__(self, name, value):
-        super().__setattr__(name, value)
-        if name in ["mu", "mui", "rem"]:
-            for mat in self._clear_on_mu_update + self._clear_on_mui_update + self._clear_on_rem_update:
-                if hasattr(self, mat):
-                    delattr(self, mat)
+        self.solver_opts = {'is_symmetric': True,
+                            'is_positive_definite': True
+                            }
 
     @property
     def survey(self):
-        """The DC survey object.
+        """The magnetic survey object.
 
         Returns
         -------
-        SimPEG.electromagnetics.static.resistivity.survey.Survey
+        SimPEG.potential_fields.magnetics.Survey
         """
         if self._survey is None:
             raise AttributeError("Simulation must have a survey")
@@ -558,6 +552,14 @@ class Simulation3DDifferential(BasePDESimulation):
     @storeJ.setter
     def storeJ(self, value):
         self._storeJ = validate_type("storeJ", value, bool)
+
+    @property
+    def exact_TMI(self):
+        return self._exact_TMI
+
+    @exact_TMI.setter
+    def exact_TMI(self, value):
+        self._exact_TMI = validate_type("exact_TMI", value, bool)
 
     @utils.requires("survey")
     def getB0(self):
@@ -588,21 +590,18 @@ class Simulation3DDifferential(BasePDESimulation):
 
     def getA(self, m):
 
-        return self._Div * self.MfMuiI * self._Div.T
+        return self._Div * self.MfMuiI * self._DivT
 
     def fields(self, m):
 
         self.model = m
 
-        if self._Ainv is not None:
-            self._Ainv.clean()
-        A = self.getA(m)
-        self._Ainv = self.solver(A, **self.solver_opts)
+        self._Ainv = self.solver(self.getA(m), **self.solver_opts)
 
         rhs = self.getRHS(m)
 
         u = self._Ainv * rhs
-        B = - self.MfMuiI * self._Div.T * u
+        B = - self.MfMuiI * self._DivT * u
 
         if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
             B0 = self.getB0()
@@ -623,11 +622,11 @@ class Simulation3DDifferential(BasePDESimulation):
 
         if self._Jmatrix is not None and self._update_J is False:
 
-            if 'tmi_exact' not in self.survey.components:
-                return self._Jmatrix @ m
-            else:
+            if self.exact_TMI:
                 dpred_fields = self._Jmatrix @ m
                 return self.projectFields({"B": dpred_fields, "u": None})
+            else:
+                return self._Jmatrix @ m
 
         if f is None:
             f = self.fields(m)
@@ -637,6 +636,8 @@ class Simulation3DDifferential(BasePDESimulation):
         return dpred
 
     def Jvec(self, m, v, f=None):
+
+        self.model = m
 
         if self.storeJ:
             J = self.getJ(m, f=f)
@@ -651,7 +652,7 @@ class Simulation3DDifferential(BasePDESimulation):
 
         Q = self.projectFieldsDeriv(B)
         B0 = self.getB0()
-        C = -self.MfMuiI * self._Div.T
+        C = -self.MfMuiI * self._DivT
 
         db_dm = 0
         dCmu_dm = 0
@@ -660,23 +661,18 @@ class Simulation3DDifferential(BasePDESimulation):
         mu_vec = np.hstack((mu, mu, mu))
 
         if self.remMap is not None:
-            Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
-                np.ones(self.mesh.n_cells * 3)
-            )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
+            Mf_rem_deriv = self._Mf_vec_deriv * sp.diags(1 / mu_vec) * self.remDeriv
             db_dm += (self.MfMuiI * Mf_rem_deriv * v)
 
         if self.muMap is not None:
-            MfMuiIderiv = self.MfMuiIDeriv
-            dCmu_dm += MfMuiIderiv(self._Div.T @ u, v, adjoint=False)
-            db_dm += self._MfMu0i * MfMuiIderiv(B0, v, adjoint=False)
+            dCmu_dm += self.MfMuiIDeriv(self._DivT @ u, v, adjoint=False)
+            db_dm += self._MfMu0i * self.MfMuiIDeriv(B0, v, adjoint=False)
 
             if getattr(self, "rem", None) is not None:
                 Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
                 mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
-                Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
-                    np.ones(self.mesh.n_cells * 3)
-                )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
-                db_dm += MfMuiIderiv(Mf_r_over_uvec, v, adjoint=False) + (self.MfMuiI * Mf_mu_vec_i_deriv * v)
+                Mf_mu_vec_i_deriv = self._Mf_vec_deriv * sp.diags(self.rem) * mu_vec_i_deriv
+                db_dm += self.MfMuiIDeriv(Mf_r_over_uvec, v, adjoint=False) + (self.MfMuiI * Mf_mu_vec_i_deriv * v)
 
         dq_dm_min_dAmu_dm = self._Div * (-dCmu_dm + db_dm)
 
@@ -688,6 +684,8 @@ class Simulation3DDifferential(BasePDESimulation):
 
     def Jtvec(self, m, v, f=None):
 
+        self.model = m
+
         if self.storeJ:
             J = self.getJ(m, f=f)
             return np.asarray(J.T.dot(v))
@@ -697,46 +695,7 @@ class Simulation3DDifferential(BasePDESimulation):
         if f is None:
             f = self.fields(m)
 
-        B, u = f["B"], f["u"]
-
-        Q = self.projectFieldsDeriv(B)
-        B0 = self.getB0()
-
-        v_array = -self._Div * self.MfMuiI.T * Q.T * v
-
-        sol = self._Ainv * v_array
-
-        DivTatsol = self._Div.T * sol
-
-        mu = np.ones(self.mesh.n_cells) * self.mu
-        mu_vec = np.hstack((mu, mu, mu))
-
-        Jtv = 0
-
-        if self.remMap is not None:
-            Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
-                np.ones(self.mesh.n_cells * 3)
-            )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
-            Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol + Q.T * v)
-
-        if self.muMap is not None:
-            MfMuiIderiv = self.MfMuiIDeriv
-            DivTatu = self._Div.T * u
-            Jtv += MfMuiIderiv(DivTatu, -Q.T * v - DivTatsol, adjoint=True)
-            Jtv += MfMuiIderiv(B0, self._MfMu0i.T * (DivTatsol + Q.T * v), adjoint=True)
-
-            if getattr(self, "rem", None) is not None:
-                Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
-                mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
-
-                Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
-                    np.ones(self.mesh.n_cells * 3)
-                )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
-
-                Jtv += MfMuiIderiv(Mf_r_over_uvec, DivTatsol + Q.T * v, adjoint=True) + Mf_mu_vec_i_deriv.T * (
-                            self.MfMuiI.T * (DivTatsol + Q.T * v))
-
-        return Jtv
+        return self._Jtvec(m,v,f)
 
     def getJ(self, m, f=None):
 
@@ -745,60 +704,58 @@ class Simulation3DDifferential(BasePDESimulation):
             if f is None:
                 f = self.fields(m)
 
-            B, u = f["B"], f["u"]
-
-            Q = self.projectFieldsDeriv(B)
-            B0 = self.getB0()
-
-            v_array = (-self._Div * self.MfMuiI.T * Q.T).toarray()
-            sol = self._Ainv * v_array
-
-            DivTatsol = self._Div.T * sol
-
-            Jtv = 0
-
-            mu = np.ones(self.mesh.n_cells) * self.mu
-            mu_vec = np.hstack((mu, mu, mu))
-
-            if self.remMap is not None:
-                Mf_rem_deriv = self.mesh.get_face_inner_product_deriv(
-                    np.ones(self.mesh.n_cells * 3)
-                )(np.ones(self.mesh.n_faces)) * sp.diags(1 / mu_vec) * self.remDeriv
-
-                Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol + Q.T.toarray())
-
-            if self.muMap is not None:
-                MfMuiIderiv = self.MfMuiIDeriv
-                DivTatu = self._Div.T * u
-                Jtv += MfMuiIderiv(DivTatu, -Q.T.toarray() - DivTatsol, adjoint=True)
-                Jtv += MfMuiIderiv(B0, self._MfMu0i.T * (DivTatsol + Q.T.toarray()), adjoint=True)
-
-                if getattr(self, "rem", None) is not None:
-                    Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
-                    mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
-
-                    Mf_mu_vec_i_deriv = self.mesh.get_face_inner_product_deriv(
-                        np.ones(self.mesh.n_cells * 3)
-                    )(np.ones(self.mesh.n_faces)) * sp.diags(self.rem) * mu_vec_i_deriv
-
-                    Jtv += MfMuiIderiv(Mf_r_over_uvec, DivTatsol + Q.T.toarray(),
-                                       adjoint=True) + Mf_mu_vec_i_deriv.T * (
-                                   self.MfMuiI.T * (DivTatsol + Q.T.toarray()))
-
+            J = self._Jtvec(m,v=None,f=f).T
 
         else:
-            Jtv = self._Jmatrix.T
+            J = self._Jmatrix
 
         if self.storeJ == True:
-            self._Jmatrix = Jtv.T
+            self._Jmatrix = J
 
-        J = Jtv.T
-
-        if self._update_J == False and "tmi_exact" in self.survey.components:
+        if self._update_J == False and self.exact_TMI:
             projection_deriv = self.projectFieldsDeriv(J @ m)
             J = projection_deriv * J
 
         return J
+
+    def _Jtvec(self, m, v, f=None):
+
+        B, u = f["B"], f["u"]
+
+        Q = self.projectFieldsDeriv(B)
+
+        B0 = self.getB0()
+        if v is None:
+            v = np.eye(Q.shape[0])
+            DivTatsol_p_QT = self._DivT * (self._Ainv * ((Q*self.MfMuiI*-self._DivT).T * v)) + Q.T * v
+        else:
+            DivTatsol_p_QT = self._DivT * (self._Ainv * ((-self._Div * (self.MfMuiI.T * (Q.T * v))))) + Q.T * v
+
+        del Q
+
+        mu = np.ones(self.mesh.n_cells) * self.mu
+        mu_vec = np.hstack((mu, mu, mu))
+
+        Jtv = 0
+
+        if self.remMap is not None:
+            Mf_rem_deriv = self._Mf_vec_deriv * sp.diags(1 / mu_vec) * self.remDeriv
+            Jtv += (self.MfMuiI * Mf_rem_deriv).T * (DivTatsol_p_QT)
+
+        if self.muMap is not None:
+            Jtv += self.MfMuiIDeriv(self._DivT * u, -DivTatsol_p_QT, adjoint=True)
+            Jtv += self.MfMuiIDeriv(B0, self._MfMu0i.T * (DivTatsol_p_QT), adjoint=True)
+
+            if getattr(self, "rem", None) is not None:
+                Mf_r_over_uvec = self.mesh.get_face_inner_product(self.rem / mu_vec).diagonal()
+                mu_vec_i_deriv = sp.vstack((self.muiDeriv, self.muiDeriv, self.muiDeriv))
+
+                Mf_mu_vec_i_deriv = self._Mf_vec_deriv * sp.diags(self.rem) * mu_vec_i_deriv
+
+                Jtv += self.MfMuiIDeriv(Mf_r_over_uvec, DivTatsol_p_QT, adjoint=True) + (Mf_mu_vec_i_deriv.T *
+                            self.MfMuiI.T) * DivTatsol_p_QT
+
+        return Jtv
 
     @property
     def Qfx(self):
@@ -835,29 +792,29 @@ class Simulation3DDifferential(BasePDESimulation):
             fields["bx"], fields["by"], fields["bz"] = np.split(u["B"], 3)
 
         else:
-            if "bx" in components or "tmi" in components or "tmi_exact" in components:
+            if "bx" in components or "tmi" in components:
                 fields["bx"] = self.Qfx * u["B"]
-            if "by" in components or "tmi" in components or "tmi_exact" in components:
+            if "by" in components or "tmi" in components:
                 fields["by"] = self.Qfy * u["B"]
-            if "bz" in components or "tmi" in components or "tmi_exact" in components:
+            if "bz" in components or "tmi" in components:
                 fields["bz"] = self.Qfz * u["B"]
 
         B0 = self.survey.source_field.b0
 
-        if "tmi_exact" in components:
-            Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
-            box = B0[0]
-            boy = B0[1]
-            boz = B0[2]
-            fields["tmi_exact"] = np.sqrt(
-                (fields["bx"] + box) ** 2 + (fields["by"] + boy) ** 2 + (fields["bz"] + boz) ** 2) - Bot
-
         if "tmi" in components:
-            Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
-            box = B0[0] / Bot
-            boy = B0[1] / Bot
-            boz = B0[2] / Bot
-            fields["tmi"] = fields["bx"] * box + fields["by"] * boy + fields["bz"] * boz
+            if self.exact_TMI:
+                Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
+                box = B0[0]
+                boy = B0[1]
+                boz = B0[2]
+                fields["tmi"] = np.sqrt(
+                    (fields["bx"] + box) ** 2 + (fields["by"] + boy) ** 2 + (fields["bz"] + boz) ** 2) - Bot
+            else:
+                Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
+                box = B0[0] / Bot
+                boy = B0[1] / Bot
+                boz = B0[2] / Bot
+                fields["tmi"] = fields["bx"] * box + fields["by"] * boy + fields["bz"] * boz
 
         return np.concatenate([fields[comp] for comp in components])
 
@@ -875,7 +832,7 @@ class Simulation3DDifferential(BasePDESimulation):
         boy = B0[1]
         boz = B0[2]
 
-        if self._update_J == False and self._Jmatrix is not None and "tmi_exact" in components:
+        if self._update_J == False and self._Jmatrix is not None and self.exact_TMI:
             bx, by, bz = np.split(Bs, 3)
 
             total_field = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2)
@@ -883,7 +840,7 @@ class Simulation3DDifferential(BasePDESimulation):
             dTMIe_dy = sp.diags((boy + by) / total_field)
             dTMIe_dz = sp.diags((boz + bz) / total_field)
 
-            fields["tmi_exact"] = sp.hstack([dTMIe_dx, dTMIe_dy, dTMIe_dz])
+            fields["tmi"] = sp.hstack([dTMIe_dx, dTMIe_dy, dTMIe_dz])
 
             diag_b = sp.diags(np.ones_like(bx))
 
@@ -893,54 +850,50 @@ class Simulation3DDifferential(BasePDESimulation):
                 fields["by"] = sp.hstack([0 * diag_b, diag_b, 0 * diag_b])
             if "bz" in components:
                 fields["bz"] = sp.hstack([0 * diag_b, 0 * diag_b, diag_b])
-            if "tmi" in components:
-                dTMIa_dx = sp.diags(np.ones_like(bx) * box / Bot)
-                dTMIa_dy = sp.diags(np.ones_like(bx) * boy / Bot)
-                dTMIa_dz = sp.diags(np.ones_like(bx) * boz / Bot)
-                fields["tmi"] = sp.hstack([dTMIa_dx, dTMIa_dy, dTMIa_dz])
 
             return sp.vstack([fields[comp] for comp in components])
 
-        if "bx" in components or "tmi" in components or "tmi_exact" in components:
+        if "bx" in components or "tmi" in components:
             fields["bx"] = self.Qfx
-        if "by" in components or "tmi" in components or "tmi_exact" in components:
+        if "by" in components or "tmi" in components:
             fields["by"] = self.Qfy
-        if "bz" in components or "tmi" in components or "tmi_exact" in components:
+        if "bz" in components or "tmi" in components:
             fields["bz"] = self.Qfz
 
         if "tmi" in components:
-            bx = fields["bx"]
-            by = fields["by"]
-            bz = fields["bz"]
-            # Generate unit vector
-            B0 = self.survey.source_field.b0
-            Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
-            box = B0[0] / Bot
-            boy = B0[1] / Bot
-            boz = B0[2] / Bot
-            fields["tmi"] = bx * box + by * boy + bz * boz
+            if self.exact_TMI:
+                if not self._update_J and self._Jmatrix is None:
+                    return sp.vstack((self.Qfx, self.Qfy, self.Qfz))
 
-        if "tmi_exact" in components:
-            if self._update_J == False and self._Jmatrix is None:
-                return sp.vstack((self.Qfx, self.Qfy, self.Qfz))
+                box = B0[0]
+                boy = B0[1]
+                boz = B0[2]
 
-            box = B0[0]
-            boy = B0[1]
-            boz = B0[2]
+                bx = self.Qfx * Bs
+                by = self.Qfy * Bs
+                bz = self.Qfz * Bs
 
-            bx = self.Qfx * Bs
-            by = self.Qfy * Bs
-            bz = self.Qfz * Bs
+                dpred = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
 
-            dpred = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2) - Bot
+                dDhalf_dD = sdiag(1 / (dpred + Bot))
 
-            dDhalf_dD = sdiag(1 / (dpred + Bot))
+                xterm = sdiag(box + bx) * self.Qfx
+                yterm = sdiag(boy + by) * self.Qfy
+                zterm = sdiag(boz + bz) * self.Qfz
 
-            xterm = sdiag(box + bx) * self.Qfx
-            yterm = sdiag(boy + by) * self.Qfy
-            zterm = sdiag(boz + bz) * self.Qfz
+                fields["tmi"] = dDhalf_dD * (xterm + yterm + zterm)
 
-            fields["tmi_exact"] = dDhalf_dD * (xterm + yterm + zterm)
+            else:
+                bx = fields["bx"]
+                by = fields["by"]
+                bz = fields["bz"]
+                # Generate unit vector
+                B0 = self.survey.source_field.b0
+                Bot = np.sqrt(B0[0] ** 2 + B0[1] ** 2 + B0[2] ** 2)
+                box = B0[0] / Bot
+                boy = B0[1] / Bot
+                boz = B0[2] / Bot
+                fields["tmi"] = bx * box + by * boy + bz * boz
 
         return sp.vstack([fields[comp] for comp in components])
 
@@ -950,9 +903,13 @@ class Simulation3DDifferential(BasePDESimulation):
         if self._update_J:
             if self._Jmatrix is not None:
                 toDelete = toDelete + ["_Jmatrix"]
-        if self.muMap is not None or self.muiMap is not None:
-            toDelete = toDelete + self._clear_on_mu_update + self._clear_on_mui_update
-        if self.remMap is not None:
-            toDelete = toDelete + self._clear_on_rem_update
         return toDelete
+
+    @property
+    def clean_on_model_update(self):
+        toclean = super().clean_on_model_update
+        if self.muMap is None:
+            return toclean
+        else:
+            return toclean + ["_Ainv"]
 
