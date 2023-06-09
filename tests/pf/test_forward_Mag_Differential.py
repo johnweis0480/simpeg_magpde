@@ -7,7 +7,7 @@ import numpy as np
 
 
 class ProlateEllispse:
-    """Class for magnetostatic solution for a permeable and remanently
+    r"""Class for magnetostatic solution for a permeable and remanently
     magnetized prolate ellipse in a uniform magnetostatic field
     based on: https://github.com/pinga-lab/magnetic-ellipsoid
 
@@ -34,12 +34,12 @@ class ProlateEllispse:
 
     def __init__(
         self,
-        center=[0, 0, 0],
-        axes=[100.1, 100],
-        strike_dip_rake=[0, 0, 0],
+        center=(0, 0, 0),
+        axes=(100.1, 100),
+        strike_dip_rake=(0, 0, 0),
         susceptibility=0.0,
-        Mr=np.array([0, 0, 0]),
-        inducing_field=[50000, 0, 90],
+        Mr=(0.0, 0.0, 0.0),
+        inducing_field=(50000, 0, 90),
         **kwargs,
     ):
         self.center = self.__redefine_coords(center)
@@ -62,10 +62,8 @@ class ProlateEllispse:
 
     @center.setter
     def center(self, vec):
-        try:
-            vec = np.atleast_1d(vec).astype(float)
-        except:
-            raise TypeError(f"location must be array_like, got {type(vec)}")
+
+        vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
             raise ValueError(
@@ -87,10 +85,8 @@ class ProlateEllispse:
 
     @axes.setter
     def axes(self, vec):
-        try:
-            vec = np.atleast_1d(vec).astype(float)
-        except:
-            raise TypeError(f"location must be array_like, got {type(vec)}")
+
+        vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 2:
             raise ValueError(
@@ -122,10 +118,7 @@ class ProlateEllispse:
 
     @V.setter
     def V(self, vec):
-        try:
-            vec = np.atleast_1d(vec).astype(float)
-        except:
-            raise TypeError(f"strike_dip_rake must be array_like, got {type(vec)}")
+        vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
             raise ValueError(
@@ -154,7 +147,7 @@ class ProlateEllispse:
 
     @property
     def Mr(self):
-        """The remanent polarization (\mu0 M), (nT)
+        r"""The remanent polarization (\mu0 M), (nT)
 
         Returns
         -------
@@ -165,10 +158,8 @@ class ProlateEllispse:
 
     @Mr.setter
     def Mr(self, vec):
-        try:
-            vec = np.atleast_1d(vec).astype(float)
-        except:
-            raise TypeError(f"location must be array_like, got {type(vec)}")
+
+        vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
             raise ValueError(
@@ -189,10 +180,8 @@ class ProlateEllispse:
 
     @B_0.setter
     def B_0(self, vec):
-        try:
-            vec = np.atleast_1d(vec).astype(float)
-        except:
-            raise TypeError(f"primary_field must be array_like, got {type(vec)}")
+
+        vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
             raise ValueError(
@@ -534,7 +523,7 @@ def get_mesh():
     return mesh
 
 
-def get_survey(components=["bx", "by", "bz"]):
+def get_survey(components=("bx", "by", "bz")):
     ccx = np.linspace(-1400, 1400, num=57)
     ccy = np.linspace(-1400, 1400, num=57)
     ccx, ccy = np.meshgrid(ccx, ccy)
@@ -567,17 +556,17 @@ def test_forward(model_type):
     declination = survey.source_field.declination
     inducing_field = [amplitude, inclination, declination]
 
-    if model_type is "mu_rem":
+    if model_type == "mu_rem":
         susceptibility = 5
         MrX = 150000
         MrY = 150000
         MrZ = 150000
-    if model_type is "mu":
+    if model_type == "mu":
         susceptibility = 5
         MrX = 0
         MrY = 0
         MrZ = 0
-    if model_type is "rem":
+    if model_type == "rem":
         susceptibility = 0
         MrX = 150000
         MrY = 150000
@@ -611,9 +600,9 @@ def test_forward(model_type):
 
     u0_Mr_model = mkvc(np.array([Rx, Ry, Rz]).T)
 
-    if model_type is "mu":
+    if model_type == "mu":
         u0_Mr_model = None
-    if model_type is "rem":
+    if model_type == "rem":
         mu_model = None
 
     simulation = PF.magnetics.simulation.Simulation3DDifferential(

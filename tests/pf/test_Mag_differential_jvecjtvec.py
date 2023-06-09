@@ -32,7 +32,7 @@ def get_mesh():
     return mesh
 
 
-def get_survey(components=["bx", "by", "bz"]):
+def get_survey(components=("bx", "by", "bz")):
     ccx = np.linspace(-1400, 1400, num=57)
     ccy = np.copy(ccx)
 

@@ -8,9 +8,7 @@ from SimPEG import utils
 from ..base import BasePFSimulation, BaseEquivalentSourceLayerSimulation
 from ...base import BaseMagneticPDESimulation
 from .survey import Survey
-from .analytics import CongruousMagBC
 
-from SimPEG import Solver
 from SimPEG import props
 
 from SimPEG.utils import mkvc, mat_utils, sdiag
@@ -492,6 +490,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
     where \Vec{M_r} is a fixed magnetization unaffected by the inducing field
     and \mu\Vec{H} is the induced magnetization
     """
+
     _Jmatrix = None
     _Ainv = None
 
@@ -728,10 +727,10 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         else:
             J = self._Jmatrix
 
-        if self.storeJ == True:
+        if self.storeJ is True:
             self._Jmatrix = J
 
-        if self._update_J == False and self.exact_TMI:
+        if self._update_J is False and self.exact_TMI:
             projection_deriv = self.projectFieldsDeriv(J @ m)
             J = projection_deriv * J
 
@@ -869,7 +868,7 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         boy = B0[1]
         boz = B0[2]
 
-        if self._update_J == False and self._Jmatrix is not None and self.exact_TMI:
+        if self._update_J is False and self._Jmatrix is not None and self.exact_TMI:
             bx, by, bz = np.split(Bs, 3)
 
             total_field = np.sqrt((bx + box) ** 2 + (by + boy) ** 2 + (bz + boz) ** 2)
