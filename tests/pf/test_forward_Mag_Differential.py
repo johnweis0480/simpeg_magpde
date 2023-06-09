@@ -11,25 +11,25 @@ class ProlateEllispse:
     magnetized prolate ellipse in a uniform magnetostatic field
     based on: https://github.com/pinga-lab/magnetic-ellipsoid
 
-        The ``ProlateEllipse`` class is used to analytically compute the external and internal
-        secondary magnetic flux density
+    The ``ProlateEllipse`` class is used to analytically compute the external and internal
+    secondary magnetic flux density
 
-        Parameters
-        ----------
-        center : (3) array_like, optional
-            center of ellipsoid (m).
-        axis : (2) array_like, optional
-            major and both minor axes of ellipsoid (m).
-        strike_dip_rake : (3) array_like, optional
-            strike, dip, and rake of ellipsoid, defined in paper (degrees)
-            Sets property V (rotation matrix)
-        susceptibility : float
-            susceptibility of ellipsoid (SI).
-        Mr : (3) array_like, optional
-            Intrinsic remanent magnetic polarization (\mu_0 M) of ellipsoid.
-            If susceptibility = 0,equivalent to total resultant magnetization. (nT)
-        inducing_field : (3) array_like, optional
-            Ambient Geomagnetic Field.  (strength(nT),inclination (degrees), declination (degrees)
+    Parameters
+    ----------
+    center : (3) array_like, optional
+        center of ellipsoid (m).
+    axis : (2) array_like, optional
+        major and both minor axes of ellipsoid (m).
+    strike_dip_rake : (3) array_like, optional
+        strike, dip, and rake of ellipsoid, defined in paper (degrees)
+        Sets property V (rotation matrix)
+    susceptibility : float
+        susceptibility of ellipsoid (SI).
+    Mr : (3) array_like, optional
+        Intrinsic remanent magnetic polarization (\mu_0 M) of ellipsoid.
+        If susceptibility = 0,equivalent to total resultant magnetization. (nT)
+    inducing_field : (3) array_like, optional
+        Ambient Geomagnetic Field.  (strength(nT),inclination (degrees), declination (degrees)
     """
 
     def __init__(
@@ -62,7 +62,6 @@ class ProlateEllispse:
 
     @center.setter
     def center(self, vec):
-
         vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
@@ -85,7 +84,6 @@ class ProlateEllispse:
 
     @axes.setter
     def axes(self, vec):
-
         vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 2:
@@ -158,7 +156,6 @@ class ProlateEllispse:
 
     @Mr.setter
     def Mr(self, vec):
-
         vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
@@ -180,7 +177,6 @@ class ProlateEllispse:
 
     @B_0.setter
     def B_0(self, vec):
-
         vec = np.atleast_1d(vec).astype(float)
 
         if len(vec) != 3:
@@ -243,12 +239,12 @@ class ProlateEllispse:
         """Returns the resultant magnetization of the ellipsoid as a function
         of susceptibility and remanent magnetization
 
-            Parameters
-            ----------
+        Parameters
+        ----------
 
-            Returns
-            -------
-            M: (3) numpy.ndarray of float
+        Returns
+        -------
+        M: (3) numpy.ndarray of float
 
         """
 
