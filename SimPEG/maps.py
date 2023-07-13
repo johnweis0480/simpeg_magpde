@@ -32,6 +32,9 @@ from .utils import (
     validate_list_of_types,
 )
 
+import torch as torch
+from torch.autograd.functional import jacobian, jvp
+
 
 class IdentityMap:
     r"""Identity mapping and the base mapping class for all other SimPEG mappings.
@@ -4513,6 +4516,50 @@ class BaseParametric(IdentityMap):
     def is_linear(self):
         return False
 
+class PytorchMapping(BaseParametric):
+
+    def __init__(self, mesh=None, nP=None, indicesActive = None, forward_transform=None, inverse_transform=None,params = None,**kwargs):
+        self.mesh = mesh
+
+        self._nP = nP
+        self.forward_transform = forward_transform
+        self.inverse_transform = inverse_transform
+        self.indActive = indicesActive
+        self.params = params
+        self.xyz = np.vstack((self.x,self.y,self.z)).T
+        self.built_in_params = (self.xyz)
+
+    def _transform(self, m):
+        '''
+        model parameters (parametric or latent dimensionality)
+        '''
+        m_loc = torch.Tensor(m)
+
+        if self.params is not None:
+             return self.forward_transform(m_loc,self.params,self.built_in_params).numpy()
+        else:
+            return self.forward_transform(m_loc).numpy()
+
+
+    def deriv(self, m, v=None):
+        m_loc = torch.Tensor(m)
+
+        if v is not None:
+            v_loc = torch.Tensor(v)
+            return sp.csr_matrix(jvp(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,v_loc)[1].numpy())
+        else:
+            return sp.csr_matrix(jacobian(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,strategy='forward-mode',vectorize=True).numpy())
+
+    @property
+    def nP(self):
+        return self._nP
+
+    @property
+    def shape(self):
+        if self.indActive is not None:
+            return (self.indActive.sum(), self._nP)
+        else:
+            return (self.mesh.n_cells, self._nP)
 
 class ParametricLayer(BaseParametric):
     r"""Mapping for a horizontal layer within a wholespace.
