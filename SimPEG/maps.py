@@ -4527,7 +4527,6 @@ class PytorchMapping(BaseParametric):
         self.indActive = indicesActive
         self.params = params
         self.xyz = np.vstack((self.x,self.y,self.z)).T
-        self.built_in_params = (self.xyz)
 
     def _transform(self, m):
         '''
@@ -4536,7 +4535,7 @@ class PytorchMapping(BaseParametric):
         m_loc = torch.Tensor(m)
 
         if self.params is not None:
-             return self.forward_transform(m_loc,self.params,self.built_in_params).numpy()
+             return self.forward_transform(m_loc,self.params,self.xyz).numpy()
         else:
             return self.forward_transform(m_loc).numpy()
 
@@ -4546,9 +4545,9 @@ class PytorchMapping(BaseParametric):
 
         if v is not None:
             v_loc = torch.Tensor(v)
-            return sp.csr_matrix(jvp(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,v_loc)[1].numpy())
+            return sp.csr_matrix(jvp(lambda m_loc: self.forward_transform(m_loc,self.params,self.xyz),m_loc,v_loc)[1].numpy())
         else:
-            return sp.csr_matrix(jacobian(lambda m_loc: self.forward_transform(m_loc,self.params,self.built_in_params),m_loc,strategy='forward-mode',vectorize=True).numpy())
+            return sp.csr_matrix(jacobian(lambda m_loc: self.forward_transform(m_loc,self.params,self.xyz),m_loc,strategy='forward-mode',vectorize=True).numpy())
 
     @property
     def nP(self):
