@@ -184,6 +184,17 @@ class BaseAmplitude(BaseVectorRegularization):
         """ """
         d_m = self._delta_m(m)
 
+        '''
+        test2=self.f_m_deriv(m)
+
+        test3 = (
+            self.W.T
+            @ self.W
+            @ (self.f_m_deriv(m) @ d_m).reshape((-1, self.n_comp), order="F")
+        )
+
+        test = (self.f_m_deriv(m) @ d_m).reshape((-1, self.n_comp), order="F")
+        '''
         return self.f_m_deriv(m).T * (
             self.W.T
             @ self.W
@@ -264,11 +275,21 @@ class AmplitudeSmoothnessFirstOrder(SparseSmoothness, BaseAmplitude):
             (self.n_comp * nC,),
             (nC, self.n_comp),
         ]
-
+    '''
     def f_m(self, m):
         a = self.amplitude(m)
 
         return self.cell_gradient @ a
+    '''
+
+    def f_m(self, m):
+        m = self.mapping * m
+
+        fm = sp.block_diag([self.cell_gradient] * self.n_comp)*m
+        x,y,z = np.split(fm,3)
+        f_m = np.sqrt(x**2+y**2+z**2)
+        #f_m = self.amplitude(fm)
+        return f_m
 
     def f_m_deriv(self, m) -> csr_matrix:
         """"""

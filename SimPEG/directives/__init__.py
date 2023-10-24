@@ -18,6 +18,8 @@ from .directives import (
     JointScalingSchedule,
     UpdateSensitivityWeights,
     ProjectSphericalBounds,
+    SmoothModel,
+    PrintRegs
 )
 
 from .pgi_directives import (

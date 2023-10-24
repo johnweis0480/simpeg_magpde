@@ -2248,6 +2248,46 @@ class ChiMap(IdentityMap):
         """
         return m / mu_0 - 1
 
+class AmplitudeMap(IdentityMap):
+    """Amplitude Map
+
+    Convert Effective Susceptibility to remanence
+
+    .. math::
+
+        \mu(m) = \mu_0 (1 + \chi(m))
+
+    """
+
+    def __init__(self, mesh=None, nP=None, **kwargs):
+        super(AmplitudeMap, self).__init__(mesh=mesh, nP=nP, **kwargs)
+
+
+    def _transform(self, m):
+        x,y,z = np.split(m,3)
+        return np.sqrt(x**2+y**2+z**2)
+
+
+    def deriv(self, m, v=None):
+        x, y, z = np.split(m, 3)
+        amp = self._transform(m)+1e-12
+        dm_dx = sp.diags(x/amp)
+        dm_dy = sp.diags(y/amp)
+        dm_dz = sp.diags(z/amp)
+
+        amp_deriv = sp.hstack([dm_dx,dm_dy,dm_dz])
+
+        if v is not None:
+            return amp_deriv * v
+        return amp_deriv
+
+    @property
+    def shape(self):
+        """
+        Shape of the matrix operation (number of indices x nP)
+        """
+        return (int(self.nP/3),self.nP)
+
 
 class EffectiveSusMap(IdentityMap):
     r"""Effective susceptibility Map

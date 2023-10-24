@@ -2804,6 +2804,195 @@ class UpdateSensitivityWeights(InversionDirective):
 
         return True
 
+class PrintRegs(InversionDirective):
+    def initialize(self):
+
+        reg = self.reg.objfcts[0]
+        mults = reg.multipliers
+        model = np.ones_like(reg.mref)
+        for objfct,mult in zip(reg.objfcts,mults):
+            print(objfct(model))
+
+    def endIter(self):
+        reg = self.reg.objfcts[0]
+        model = self.invProb.model
+        mults = reg.multipliers
+        e=0
+        for objfct, mult in zip(reg.objfcts, mults):
+            ob =mult*objfct(model)
+            print(ob)
+            e+=ob
+        print(e)
+
+
+class SmoothModel(InversionDirective):
+    r"""
+    Sensitivity weighting for linear and non-linear least-squares inverse problems.
+
+    This directive computes the root-mean squared sensitivities for the
+    forward simulation(s) attached to the inverse problem, then truncates
+    and scales the result to create cell weights which are applied in the regularization.
+    The underlying theory is provided below in the `Notes` section.
+
+    This directive **requires** that the map for the regularization function is either
+    class:`SimPEG.maps.Wires` or class:`SimPEG.maps.Identity`. In other words, the
+    sensitivity weighting cannot be applied for parametric inversion. In addition,
+    the simulation(s) connected to the inverse problem **must** have a ``getJ`` or
+    ``getJtJdiag`` method.
+
+    This directive's place in the :class:`DirectivesList` **must** be
+    before any directives which update the preconditioner for the inverse problem
+    (i.e. :class:`UpdatePreconditioner`), and **must** be before any directives that
+    estimate the starting trade-off parameter (i.e. :class:`EstimateBeta_ByEig`
+    and :class:`EstimateBetaMaxDerivative`).
+
+    Parameters
+    ----------
+    every_iteration : bool
+        When ``True``, update sensitivity weighting at every model update; non-linear problems.
+        When ``False``, create sensitivity weights for starting model only; linear problems.
+    threshold : float
+        Threshold value for smallest weighting value.
+    threshold_method : {'amplitude', 'global', 'percentile'}
+        Threshold method for how `threshold_value` is applied:
+
+            - amplitude:
+                the smallest root-mean squared sensitivity is a fractional percent of the largest value; must be between 0 and 1.
+            - global:
+                `threshold_value` is added to the cell weights prior to normalization; must be greater than 0.
+            - percentile:
+                the smallest root-mean squared sensitivity is set using percentile threshold; must be between 0 and 100.
+
+    normalization_method : {'maximum', 'min_value', None}
+        Normalization method applied to sensitivity weights.
+
+        Options are:
+
+            - maximum:
+                sensitivity weights are normalized by the largest value such that the largest weight is equal to 1.
+            - minimum:
+                sensitivity weights are normalized by the smallest value, after thresholding, such that the smallest weights are equal to 1.
+            - ``None``:
+                normalization is not applied.
+
+    Notes
+    -----
+    Let :math:`\mathbf{J}` represent the Jacobian. To create sensitivity weights, root-mean squared (RMS) sensitivities
+    :math:`\mathbf{s}` are computed by summing the squares of the rows of the Jacobian:
+
+    .. math::
+        \mathbf{s} = \Bigg [ \sum_i \, \mathbf{J_{i, \centerdot }}^2 \, \Bigg ]^{1/2}
+
+    The dynamic range of RMS sensitivities can span many orders of magnitude. When computing sensitivity
+    weights, thresholding is generally applied to set a minimum value.
+
+    Thresholding
+    ^^^^^^^^^^^^
+
+    If **global** thresholding is applied, we add a constant :math:`\tau` to the RMS sensitivities:
+
+    .. math::
+        \mathbf{\tilde{s}} = \mathbf{s} + \tau
+
+    In the case of **percentile** thresholding, we let :math:`s_{\%}` represent a given percentile.
+    Thresholding to set a minimum value is applied as follows:
+
+    .. math::
+        \tilde{s}_j = \begin{cases}
+        s_j \;\; for \;\; s_j \geq s_{\%} \\
+        s_{\%} \;\; for \;\; s_j < s_{\%}
+        \end{cases}
+
+    If **absolute** thresholding is applied, we define :math:`\eta` as a fractional percent.
+    In this case, thresholding is applied as follows:
+
+    .. math::
+        \tilde{s}_j = \begin{cases}
+        s_j \;\; for \;\; s_j \geq \eta s_{max} \\
+        \eta s_{max} \;\; for \;\; s_j < \eta s_{max}
+        \end{cases}
+    """
+
+    def __init__(
+        self,
+        every_iteration=False,
+        operator = None,
+        map = None,
+        actv = None,
+        **kwargs,
+    ):
+        if "everyIter" in kwargs.keys():
+            warnings.warn(
+                "'everyIter' property is deprecated and will be removed in SimPEG 0.20.0."
+                "Please use 'every_iteration'."
+            )
+            every_iteration = kwargs.pop("everyIter")
+
+
+        super().__init__(**kwargs)
+
+        self.every_iteration = every_iteration
+        self.operator = operator,
+        self.map = map,
+        self.actv = actv,
+
+    @property
+    def every_iteration(self):
+        """Update sensitivity weights when model is updated.
+
+        When ``True``, update sensitivity weighting at every model update; non-linear problems.
+        When ``False``, create sensitivity weights for starting model only; linear problems.
+
+        Returns
+        -------
+        bool
+        """
+        return self._every_iteration
+
+    @every_iteration.setter
+    def every_iteration(self, value):
+        self._every_iteration = validate_type("every_iteration", value, bool)
+
+    everyIter = deprecate_property(
+        every_iteration, "everyIter", "every_iteration", removal_version="0.20.0"
+    )
+
+
+    def initialize(self):
+        """Compute sensitivity weights upon starting the inversion."""
+        for reg in self.reg.objfcts:
+            if not isinstance(reg.mapping, (IdentityMap, Wires)):
+                raise TypeError(
+                    f"Mapping for the regularization must be of type {IdentityMap} or {Wires}. "
+                    + f"Input mapping of type {type(reg.mapping)}."
+                )
+        self.iter = 0
+        self.smooth = .95
+
+
+    def endIter(self):
+        """Execute end of iteration."""
+        """Update sensitivity weights"""
+        self.iter+=1
+        m = self.invProb.model
+        m = self.map[0] * m
+        max_msave = np.max(m)
+        rng = int(int((100-self.iter)/10)/2)
+        #rng = int(int((100 - self.iter) / 10))
+
+
+        #if np.max(m) > .03 and self.iter % 1 == 0 and rng > 0:
+        if np.max(m) > .03 and self.iter % 1 == 0 and rng > 0:
+            #rng=1
+            print(rng)
+            for i in range(rng):
+                m = self.operator[0]*m
+
+        m = m[self.actv]
+        self.invProb.model = m
+
+
+
 
 class ProjectSphericalBounds(InversionDirective):
     r"""
