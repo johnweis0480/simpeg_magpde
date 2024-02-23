@@ -1299,3 +1299,148 @@ class ProjectedGNCG(BFGS, Minimize, Remember):
         step[indx] = 0.0
 
         return step
+
+class ProjectedGNCG_shared_constraint(BFGS, Minimize, Remember):
+    def __init__(self, transform,project_back, **kwargs):
+        self.transform = transform
+        self.project_back = project_back
+        Minimize.__init__(self, **kwargs)
+
+    name = "Projected GNCG"
+
+    maxIterCG = 5
+    tolCG = 1e-1
+    cg_count = 0
+    stepOffBoundsFact = 1e-2  # perturbation of the inactive set off the bounds
+    stepActiveset = True
+    lower = -np.inf
+    upper = np.inf
+    lower_shared = -np.inf
+    upper_shared = np.inf
+
+
+    def _startup(self, x0):
+        # ensure bound vectors are the same size as the model
+        shared_x0 = self.transform(x0)
+        if not isinstance(self.lower_shared, np.ndarray):
+            self.lower_shared = np.ones_like(shared_x0) * self.lower_shared
+        if not isinstance(self.upper_shared, np.ndarray):
+            self.upper_shared = np.ones_like(shared_x0) * self.upper_shared
+        if not isinstance(self.lower, np.ndarray):
+            self.lower = np.ones_like(x0) * self.lower
+        if not isinstance(self.upper, np.ndarray):
+            self.upper = np.ones_like(x0) * self.upper
+
+    @count
+    def projection(self, x):
+        """projection(x)
+
+        Make sure we are feasible.
+
+        """
+        shared_x = self.transform(x)
+        ratio = np.median(np.c_[self.lower_shared, shared_x, self.upper_shared], axis=1)/shared_x
+        x = self.project_back(ratio)*x
+        return np.median(np.c_[self.lower, x, self.upper], axis=1)
+
+    @count
+    def activeSet(self, x):
+        """activeSet(x)
+
+        If we are on a bound
+
+        """
+        shared_x = self.transform(x)
+        shared_active = self.project_back(np.logical_or(shared_x <= self.lower_shared, shared_x >= self.upper_shared))
+
+        return shared_active+np.logical_or(x <= self.lower, x >= self.upper)
+
+    @property
+    def approxHinv(self):
+        """
+        The approximate Hessian inverse is used to precondition CG.
+
+        Default uses BFGS, with an initial H0 of *bfgsH0*.
+
+        Must be a scipy.sparse.linalg.LinearOperator
+        """
+        _approxHinv = getattr(self, "_approxHinv", None)
+        if _approxHinv is None:
+            M = sp.linalg.LinearOperator(
+                (self.xc.size, self.xc.size), self.bfgs, dtype=self.xc.dtype
+            )
+            return M
+        return _approxHinv
+
+    @approxHinv.setter
+    def approxHinv(self, value):
+        self._approxHinv = value
+
+    @timeIt
+    def findSearchDirection(self):
+        """
+        findSearchDirection()
+        Finds the search direction based on projected CG
+        """
+        self.cg_count = 0
+        Active = self.activeSet(self.xc)
+        temp = sum((np.ones_like(self.xc.size) - Active))
+
+        step = np.zeros(self.g.size)
+        resid = -(1 - Active) * self.g
+
+        r = resid - (1 - Active) * (self.H * step)
+
+        p = self.approxHinv * r
+
+        sold = np.dot(r, p)
+
+        count = 0
+
+        while np.all([np.linalg.norm(r) > self.tolCG, count < self.maxIterCG]):
+            count += 1
+
+            q = (1 - Active) * (self.H * p)
+
+            alpha = sold / (np.dot(p, q))
+
+            step += alpha * p
+
+            r -= alpha * q
+
+            h = self.approxHinv * r
+
+            snew = np.dot(r, h)
+
+            p = h + (snew / sold * p)
+
+            sold = snew
+            # End CG Iterations
+        self.cg_count += count
+
+        # Take a gradient step on the active cells if exist
+        if temp != self.xc.size:
+            rhs_a = (Active) * -self.g
+
+            dm_i = max(abs(step))
+            dm_a = max(abs(rhs_a))
+
+            # perturb inactive set off of bounds so that they are included
+            # in the step
+            step = step + self.stepOffBoundsFact * (rhs_a * dm_i / dm_a)
+
+        # Only keep gradients going in the right direction on the active
+        # set
+        shared_step = self.transform(self.xc + step) - self.transform(self.xc)
+
+        indx = ((self.transform(self.xc) <= self.lower_shared) & (shared_step < 0)) | (
+                (self.transform(self.xc) >= self.upper_shared) & (shared_step > 0)
+        )
+        indx = self.project_back(indx)
+        step[indx] = 0.0
+        indx = ((self.xc <= self.lower) & (step < 0)) | (
+            (self.xc >= self.upper) & (step > 0)
+        )
+        step[indx] = 0.0
+
+        return step
