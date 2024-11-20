@@ -1309,6 +1309,32 @@ class Simulation3DDifferential(BaseMagneticPDESimulation):
         dpred = self.projectFields(f)
 
         return dpred
+
+    def Magnetization(self, m):
+        self.model = m
+
+        self._Ainv = self.solver(self.getA(m), **self.solver_opts)
+
+        rhs = self.getRHS(m)
+
+        u = self._Ainv * rhs
+        B = -self.MfMuiI * self._DivT * u
+
+        if not np.isscalar(self.mu) or not np.allclose(self.mu, mu_0):
+            B0 = self.getB0()
+            B += self._MfMu0i * self.MfMuiI * B0 - B0
+
+        if self.rem is not None:
+            mu = self.mu * np.ones(self.mesh.n_cells)
+            mu_vec = np.hstack((mu, mu, mu))
+            B += (
+                self.MfMuiI * self.mesh.get_face_inner_product(self.rem / mu_vec)
+            ).diagonal()
+
+        mu0_H = -self._MfMu0iI * self._DivT * u
+        mu0_M = B - mu0_H
+
+        return mu0_M
     def Jvec(self, m, v, f=None):
         self.model = m
 
